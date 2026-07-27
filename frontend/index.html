@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Focus Companion</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#FDFBF7">
+  <style>
+    :root {
+      --bg-main: #FDFBF7;
+      --card-bg: #FFFFFF;
+      --primary-accent: #D97706;
+      --text-main: #27272A;
+      --text-muted: #71717A;
+      --border-color: #F3E8DC;
+      --badge-unsnoozable: #DC2626;
+    }
+    body {
+      background: var(--bg-main);
+      color: var(--text-main);
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0; padding: 16px;
+      display: flex; justify-content: center;
+    }
+    .container { width: 100%; max-width: 420px; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 12px rgba(120, 53, 15, 0.04);
+    }
+    .now-card { border-left: 6px solid var(--primary-accent); }
+    .next-card { border-left: 6px solid var(--text-muted); opacity: 0.85; }
+    .badge {
+      font-size: 0.75rem; font-weight: bold; padding: 4px 8px; border-radius: 6px; text-transform: uppercase;
+    }
+    .badge-now { background: #FEF3C7; color: #92400E; }
+    .badge-locked { background: #FEE2E2; color: var(--badge-unsnoozable); }
+    .install-btn {
+      width: 100%; padding: 12px; background: var(--text-main); color: white;
+      border: none; border-radius: 8px; font-weight: bold; cursor: pointer; display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header style="margin-bottom: 20px;">
+      <h2 style="margin: 0;">Daily Focus</h2>
+      <p style="margin: 4px 0 0; color: var(--text-muted); font-size: 0.9rem;">One task at a time.</p>
+    </header>
+
+    <!-- HAPPENING NOW -->
+    <div class="card now-card">
+      <div style="display: flex; justify-content: space-between;">
+        <span class="badge badge-now">Happening Now</span>
+        <span style="color: var(--text-muted); font-size: 0.85rem;">10:00 AM - 12:00 PM</span>
+      </div>
+      <h3 style="margin: 12px 0 4px;">Setup Environment & Coding</h3>
+      <p style="margin: 0; color: #059669; font-weight: 600; font-size: 0.9rem;">In Progress</p>
+    </div>
+
+    <!-- UP NEXT -->
+    <div class="card next-card">
+      <div style="display: flex; justify-content: space-between;">
+        <span class="badge" style="background: #E4E4E7; color: #3F3F46;">Up Next</span>
+        <span class="badge badge-locked">Locked</span>
+      </div>
+      <h4 style="margin: 10px 0 2px; color: #3F3F46;">Exercise & Stretch</h4>
+      <span style="color: var(--text-muted); font-size: 0.85rem;">12:00 PM - 01:00 PM</span>
+    </div>
+
+    <!-- PWA INSTALL PROMPT -->
+    <button id="install-btn" class="install-btn">Add App to Home Screen</button>
+  </div>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
+    let deferredPrompt;
+    const btn = document.getElementById('install-btn');
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      btn.style.display = 'block';
+    });
+
+    btn.addEventListener('click', () => {
+      btn.style.display = 'none';
+      if (deferredPrompt) {
+        deferredPrompt.prompt();
+        deferredPrompt = null;
+      }
+    });
+  </script>
+</body>
+</html>
