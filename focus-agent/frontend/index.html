@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0a0a0f" />
+    
+    <!-- PWA -->
+    <link rel="manifest" href="manifest.json" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    
+    <title>🎯 Focus Agent</title>
+    
+    <style>
+        /* ============================================
+           RESET & BASE
+           ============================================ */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a2a;
+            --bg-input: #0a0a15;
+            --border-color: #2a2a3a;
+            --text-primary: #e8e8f0;
+            --text-secondary: #8888aa;
+            --text-muted: #555577;
+            --accent-purple: #764ba2;
+            --accent-blue: #667eea;
+            --accent-green: #55dd88;
+            --accent-red: #ff6677;
+            --accent-orange: #ffaa44;
+            --gradient-main: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+            --radius: 16px;
+            --radius-sm: 10px;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 12px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+        }
+        
+        /* ============================================
+           APP CONTAINER
+           ============================================ */
+        .app {
+            max-width: 600px;
+            width: 100%;
+            background: var(--bg-secondary);
+            border-radius: 24px;
+            padding: 20px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow);
+            min-height: 90vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* ============================================
+           HEADER
+           ============================================ */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-shrink: 0;
+        }
+        
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .header .logo {
+            font-size: 28px;
+        }
+        
+        .header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .header .badge {
+            font-size: 10px;
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            -webkit-text-fill-color: var(--bg-primary);
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .header-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 8px 14px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .header-btn:hover {
+            background: var(--border-color);
+            color: var(--text-primary);
+        }
+        
+        .header-btn.active {
+            background: var(--gradient-main);
+            color: white;
+            border-color: transparent;
+        }
+        
+        /* ============================================
+           STATUS BAR
+           ============================================ */
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            background: var(--bg-card);
+            border-radius: var(--radius-sm);
+            margin-bottom: 16px;
+            flex-shrink: 0;
+            border: 1px solid var(--border-color);
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-dot.online {
+            background: var(--accent-green);
+        }
+        
+        .status-dot.offline {
+            background: var(--accent-red);
+        }
+        
+        .status-dot.processing {
+            background: var(--accent-orange);
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.8); }
+        }
+        
+        .task-count {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        
+        .task-count span {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        /* ============================================
+           API KEY SECTION
+           ============================================ */
+        .api-section {
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 16px;
+            border: 1px solid var(--border-color);
+            flex-shrink: 0;
+            transition: all 0.3s;
+        }
+        
+        .api-section.has-key {
+            border-color: var(--accent-green);
+        }
+        
+        .api-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .api-row input {
+            flex: 1;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: monospace;
+            transition: border-color 0.2s;
+        }
+        
+        .api-row input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .api-row input::placeholder {
+            color: var(--text-muted);
+        }
+        
+        .api-row button {
+            background: var(--gradient-main);
+            border: none;
+            color: white;
+            padding: 10px 18px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        
+        .api-row button:hover {
+            transform: scale(1.02);
+            opacity: 0.9;
+        }
+        
+        .api-status {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        
+        .api-status.ready {
+            color: var(--accent-green);
+        }
+        
+        .api-status.error {
+            color: var(--accent-red);
+        }
+        
+        /* ============================================
+           CHAT / INPUT AREA
+           ============================================ */
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        
+        /* Messages */
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0 16px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 200px;
+            max-height: 400px;
+        }
+        
+        .messages::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .messages::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        
+        .messages::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 10px;
+        }
+        
+        /* Message Bubbles */
+        .message {
+            display: flex;
+            gap: 10px;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            justify-content: flex-end;
+        }
+        
+        .message.agent {
+            justify-content: flex-start;
+        }
+        
+        .message .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+        
+        .message.user .avatar {
+            background: var(--gradient-main);
+        }
+        
+        .message.agent .avatar {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+        }
+        
+        .message .bubble {
+            max-width: 85%;
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            font-size: 14px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+        
+        .message.user .bubble {
+            background: var(--gradient-main);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+        
+        .message.agent .bubble {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 4px;
+            color: var(--text-primary);
+        }
+        
+        .message .bubble .time {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            display: block;
+        }
+        
+        .message.user .bubble .time {
+            color: rgba(255, 255, 255, 0.6);
+        }
+        
+        /* Schedule in message */
+        .schedule-block {
+            margin-top: 10px;
+            background: var(--bg-input);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .schedule-block .sch-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        
+        .schedule-block .sch-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+        
+        .schedule-block .sch-item:hover {
+            background: var(--bg-card);
+        }
+        
+        .schedule-block .sch-time {
+            font-family: monospace;
+            color: var(--text-secondary);
+            min-width: 80px;
+            font-size: 12px;
+        }
+        
+        .schedule-block .sch-task {
+            flex: 1;
+        }
+        
+        .schedule-block .sch-status {
+            font-size: 14px;
+        }
+        
+        /* ============================================
+           INPUT BAR
+           ============================================ */
+        .input-bar {
+            display: flex;
+            gap: 10px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+        
+        .input-bar textarea {
+            flex: 1;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-size: 14px;
+            resize: none;
+            min-height: 48px;
+            max-height: 120px;
+            font-family: inherit;
+            transition: border-color 0.2s;
+            line-height: 1.4;
+        }
+        
+        .input-bar textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .input-bar textarea::placeholder {
+            color: var(--text-muted);
+        }
+        
+        .input-bar .send-btn {
+            background: var(--gradient-main);
+            border: none;
+            color: white;
+            padding: 0 20px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 20px;
+            transition: all 0.2s;
+            flex-shrink: 0;
+            min-height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .input-bar .send-btn:hover {
+            transform: scale(1.02);
+            opacity: 0.9;
+        }
+        
+        .input-bar .send-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .input-bar .send-btn.loading {
+            position: relative;
+        }
+        
+        .input-bar .send-btn.loading .spinner {
+            display: block;
+        }
+        
+        .input-bar .send-btn.loading .send-icon {
+            display: none;
+        }
+        
+        .input-bar .spinner {
+            display: none;
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Quick action chips */
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+            padding: 8px 0 4px 0;
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+        
+        .quick-action {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        
+        .quick-action:hover {
+            background: var(--border-color);
+            color: var(--text-primary);
+        }
+        
+        .quick-action.emergency {
+            border-color: var(--accent-red);
+            color: var(--accent-red);
+        }
+        
+        .quick-action.emergency:hover {
+            background: var(--accent-red);
+            color: white;
+        }
+        
+        /* ============================================
+           FOOTER
+           ============================================ */
+        .footer {
+            margin-top: 16px;
+            text-align: center;
+            font-size: 11px;
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+        
+        /* ============================================
+           RESPONSIVE
+           ============================================ */
+        @media (max-width: 480px) {
+            .app {
+                padding: 14px;
+                border-radius: 16px;
+            }
+            
+            .header h1 {
+                font-size: 17px;
+            }
+            
+            .header .badge {
+                font-size: 8px;
+                padding: 1px 8px;
+            }
+            
+            .api-row {
+                flex-direction: column;
+            }
+            
+            .api-row button {
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .message .bubble {
+                max-width: 92%;
+                font-size: 13px;
+            }
+            
+            .schedule-block .sch-item {
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+            
+            .schedule-block .sch-time {
+                min-width: 60px;
+                font-size: 11px;
+            }
+            
+            .quick-actions {
+                gap: 6px;
+            }
+            
+            .quick-action {
+                font-size: 11px;
+                padding: 3px 10px;
+            }
+        }
+        
+        /* ============================================
+           UTILITY
+           ============================================ */
+        .hidden {
+            display: none !important;
+        }
+        
+        .text-gradient {
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        /* ============================================
+           EMPTY STATE
+           ============================================ */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+            flex: 1;
+        }
+        
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+        
+        .empty-state h3 {
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+        
+        .empty-state p {
+            font-size: 14px;
+            max-width: 300px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="app" id="app">
+        
+        <!-- ==========================================
+        HEADER
+        ========================================== -->
+        <header class="header">
+            <div class="header-left">
+                <span class="logo">🎯</span>
+                <h1>Focus Agent</h1>
+                <span class="badge">v1</span>
+            </div>
+            <div class="header-actions">
+                <button class="header-btn" id="clearBtn" title="Clear chat">✕</button>
+                <button class="header-btn" id="installBtn">📱</button>
+            </div>
+        </header>
+        
+        <!-- ==========================================
+        STATUS BAR
+        ========================================== -->
+        <div class="status-bar">
+            <div class="status-indicator">
+                <span class="status-dot online" id="statusDot"></span>
+                <span id="statusText">Ready</span>
+            </div>
+            <div class="task-count">
+                📋 <span id="taskCount">0</span> tasks
+            </div>
+        </div>
+        
+        <!-- ==========================================
+        API KEY
+        ========================================== -->
+        <div class="api-section" id="apiSection">
+            <div class="api-row">
+                <input type="password" id="apiKeyInput" placeholder="sk-... enter DeepSeek API key" />
+                <button id="saveApiBtn">Save Key</button>
+            </div>
+            <div class="api-status" id="apiStatus">🔑 Enter your DeepSeek API key to start</div>
+        </div>
+        
+        <!-- ==========================================
+        CHAT AREA
+        ========================================== -->
+        <div class="chat-area">
+            <div class="messages" id="messages">
+                <!-- Empty State -->
+                <div class="empty-state" id="emptyState">
+                    <div class="icon">🧠</div>
+                    <h3>Your AI Scheduling Agent</h3>
+                    <p>Tell me your schedule, and I'll adapt when things change.<br />
+                    Try: <em>"I need to wake up at 6am, code from 7-9..."</em></p>
+                </div>
+            </div>
+            
+            <!-- Quick Actions -->
+            <div class="quick-actions">
+                <button class="quick-action" data-text="I woke up late, shift everything +30min">⏰ Woke up late</button>
+                <button class="quick-action emergency" data-text="URGENT: I have an emergency call at 10am">🚨 Emergency</button>
+                <button class="quick-action" data-text="I'm skipping my workout today">❌ Skip workout</button>
+                <button class="quick-action" data-text="Show me my schedule">📅 Show schedule</button>
+            </div>
+            
+            <!-- Input Bar -->
+            <div class="input-bar">
+                <textarea id="userInput" rows="1" placeholder="Type your message..." 
+                    aria-label="Type your message"></textarea>
+                <button class="send-btn" id="sendBtn">
+                    <span class="send-icon">➤</span>
+                    <div class="spinner"></div>
+                </button>
+            </div>
+        </div>
+        
+        <!-- ==========================================
+        FOOTER
+        ========================================== -->
+        <div class="footer">
+            Works offline · No external apps · Adaptive AI Agent
+        </div>
+    </div>
+    
+    <!-- ==========================================
+    JAVASCRIPT
+    ========================================== -->
+    <script>
+        // ============================================
+        // STATE
+        // ============================================
+        const state = {
+            apiKey: localStorage.getItem('focus_api_key') || '',
+            messages: JSON.parse(localStorage.getItem('focus_messages') || '[]'),
+            schedule: JSON.parse(localStorage.getItem('focus_schedule') || 'null'),
+            isProcessing: false,
+            taskCount: 0
+        };
+        
+        // ============================================
+        // DOM REFS
+        // ============================================
+        const $ = (id) => document.getElementById(id);
+        const els = {
+            messages: $('messages'),
+            emptyState: $('emptyState'),
+            userInput: $('userInput'),
+            sendBtn: $('sendBtn'),
+            apiKeyInput: $('apiKeyInput'),
+            saveApiBtn: $('saveApiBtn'),
+            apiStatus: $('apiStatus'),
+            apiSection: $('apiSection'),
+            statusDot: $('statusDot'),
+            statusText: $('statusText'),
+            taskCount: $('taskCount'),
+            clearBtn: $('clearBtn'),
+            installBtn: $('installBtn')
+        };
+        
+        // ============================================
+        // INIT
+        // ============================================
+        function init() {
+            // Restore API key
+            if (state.apiKey) {
+                els.apiKeyInput.value = state.apiKey;
+                els.apiSection.classList.add('has-key');
+                els.apiStatus.textContent = '✅ API key loaded';
+                els.apiStatus.className = 'api-status ready';
+            }
+            
+            // Restore messages
+            if (state.messages.length > 0) {
+                els.emptyState.classList.add('hidden');
+                state.messages.forEach(msg => renderMessage(msg, false));
+            }
+            
+            // Restore task count
+            updateTaskCount();
+            
+            // Event listeners
+            setupEventListeners();
+            
+            // Auto-resize textarea
+            setupAutoResize();
+            
+            console.log('🎯 Focus Agent initialized');
+        }
+        
+        // ============================================
+        // EVENT LISTENERS
+        // ============================================
+        function setupEventListeners() {
+            // Send message
+            els.sendBtn.addEventListener('click', handleSend);
+            els.userInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                }
+            });
+            
+            // API key
+            els.saveApiBtn.addEventListener('click', saveApiKey);
+            els.apiKeyInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') saveApiKey();
+            });
+            
+            // Quick actions
+            document.querySelectorAll('.quick-action').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    els.userInput.value = btn.dataset.text;
+                    els.userInput.focus();
+                    handleSend();
+                });
+            });
+            
+            // Clear chat
+            els.clearBtn.addEventListener('click', clearChat);
+            
+            // Install PWA
+            els.installBtn.addEventListener('click', installPWA);
+        }
+        
+        // ============================================
+        // SEND MESSAGE
+        // ============================================
+        async function handleSend() {
+            const text = els.userInput.value.trim();
+            if (!text || state.isProcessing) return;
+            
+            // Check API key
+            if (!state.apiKey) {
+                els.apiStatus.textContent = '⚠️ Please enter your DeepSeek API key first';
+                els.apiStatus.className = 'api-status error';
+                els.apiKeyInput.focus();
+                return;
+            }
+            
+            // Clear input
+            els.userInput.value = '';
+            els.userInput.style.height = 'auto';
+            
+            // Hide empty state
+            els.emptyState.classList.add('hidden');
+            
+            // Add user message
+            addMessage('user', text);
+            
+            // Set processing state
+            state.isProcessing = true;
+            els.sendBtn.disabled = true;
+            els.sendBtn.classList.add('loading');
+            setStatus('processing', 'Thinking...');
+            
+            try {
+                // TODO: Call API
+                // For now, simulate agent response
+                await simulateAgentResponse(text);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage('agent', '❌ Sorry, I encountered an error. Please try again.');
+            } finally {
+                state.isProcessing = false;
+                els.sendBtn.disabled = false;
+                els.sendBtn.classList.remove('loading');
+                setStatus('online', 'Ready');
+            }
+        }
+        
+        // ============================================
+        // SIMULATE AGENT (TODO: Replace with real API)
+        // ============================================
+        async function simulateAgentResponse(userText) {
+            // Show typing indicator
+            addMessage('agent', '⏳ Thinking...');
+            
+            // Simulate API delay
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            
+            // Remove typing message
+            const messages = els.messages.querySelectorAll('.message');
+            if (messages.length > 0 && messages[messages.length - 1].querySelector('.bubble')?.textContent === '⏳ Thinking...') {
+                messages[messages.length - 1].remove();
+            }
+            
+            // Generate response based on input
+            let response = '';
+            let schedule = null;
+            
+            const lower = userText.toLowerCase();
+            
+            if (lower.includes('wake') || lower.includes('morning') || lower.includes('schedule')) {
+                schedule = generateSampleSchedule();
+                response = `✅ I've created your schedule for today!\n\n${formatSchedule(schedule)}\n\n💡 I'll adjust automatically if anything changes. Just let me know!`;
+            } else if (lower.includes('late') || lower.includes('shift')) {
+                response = `⏰ No problem! I've shifted everything +30 minutes.\n\nYour new schedule:\n${formatSchedule(generateShiftedSchedule())}\n\nLet me know if you need any other adjustments.`;
+            } else if (lower.includes('emergency') || lower.includes('urgent')) {
+                response = `🚨 Emergency handled! I've inserted your urgent task and re-optimized the day.\n\n${formatSchedule(generateEmergencySchedule())}\n\n⚠️ Your 2pm focus block is protected.`;
+            } else if (lower.includes('skip') || lower.includes('workout')) {
+                response = `❌ Skipped workout. I've redistributed that time to other tasks.\n\n${formatSchedule(generateSkippedSchedule())}\n\n💡 Want me to move workouts to evenings going forward?`;
+            } else if (lower.includes('show') || lower.includes('schedule')) {
+                const currentSchedule = state.schedule || generateSampleSchedule();
+                response = `📅 Here's your current schedule:\n\n${formatSchedule(currentSchedule)}`;
+            } else {
+                response = `🤔 I understand you said: "${userText}"\n\nI can help you with:\n• Creating a schedule\n• Handling emergencies\n• Skipping tasks\n• Shifting time\n\nTry one of the quick actions above or tell me what you need!`;
+            }
+            
+            // Save schedule if generated
+            if (schedule) {
+                state.schedule = schedule;
+                localStorage.setItem('focus_schedule', JSON.stringify(schedule));
+                updateTaskCount();
+            }
+            
+            // Add agent response
+            addMessage('agent', response);
+        }
+        
+        // ============================================
+        // SCHEDULE GENERATORS (Mock data)
+        // ============================================
+        function generateSampleSchedule() {
+            return [
+                { time: '6:00 AM', task: '🌅 Wake up & Morning routine', status: 'now' },
+                { time: '6:30 AM', task: '🏋️ Exercise', status: 'upcoming' },
+                { time: '7:30 AM', task: '💻 Deep work: Coding', status: 'upcoming' },
+                { time: '9:30 AM', task: '📧 Email & Communication', status: 'upcoming' },
+                { time: '10:30 AM', task: '📝 Job applications', status: 'upcoming' },
+                { time: '12:00 PM', task: '🍽️ Lunch break', status: 'upcoming' },
+                { time: '1:00 PM', task: '🔒 Focus block: Project work', status: 'upcoming' },
+                { time: '3:00 PM', task: '📞 Meetings & Calls', status: 'upcoming' },
+                { time: '5:00 PM', task: '✅ Wrap up & Plan tomorrow', status: 'upcoming' }
+            ];
+        }
+        
+        function generateShiftedSchedule() {
+            const sched = generateSampleSchedule();
+            return sched.map(item => {
+                const [time, ampm] = item.time.split(' ');
+                let [hour, min] = time.split(':').map(Number);
+                hour = (hour + 1) % 12 || 12;
+                return { ...item, time: `${hour}:${min} ${ampm}` };
+            });
+        }
+        
+        function generateEmergencySchedule() {
+            const sched = generateSampleSchedule();
+            return [
+                ...sched.slice(0, 4),
+                { time: '10:00 AM', task: '🚨 URGENT: Client call', status: 'now' },
+                ...sched.slice(4).map((item, i) => {
+                    const [time, ampm] = item.time.split(' ');
+                    let [hour, min] = time.split(':').map(Number);
+                    hour = hour + (i < 2 ? 1 : 0);
+                    hour = hour % 12 || 12;
+                    return { ...item, time: `${hour}:${min} ${ampm}` };
+                })
+            ];
+        }
+        
+        function generateSkippedSchedule() {
+            const sched = generateSampleSchedule();
+            return sched.filter(item => !item.task.includes('Exercise'));
+        }
+        
+        function formatSchedule(schedule) {
+            if (!schedule || schedule.length === 0) return 'No tasks scheduled.';
+            return schedule.map(item => {
+                const status = item.status === 'now' ? '🔴' : '⚪';
+                return `${status} ${item.time} - ${item.task}`;
+            }).join('\n');
+        }
+        
+        // ============================================
+        // RENDER MESSAGE
+        // ============================================
+        function addMessage(type, content) {
+            const msg = { type, content, timestamp: new Date().toISOString() };
+            state.messages.push(msg);
+            localStorage.setItem('focus_messages', JSON.stringify(state.messages));
+            renderMessage(msg, true);
+        }
+        
+        function renderMessage(msg, animate = true) {
+            const div = document.createElement('div');
+            div.className = `message ${msg.type}`;
+            if (!animate) div.style.animation = 'none';
+            
+            const avatar = msg.type === 'user' ? '👤' : '🤖';
+            
+            // Check if content contains schedule
+            const hasSchedule = msg.content.includes('•') && msg.content.includes('-');
+            
+            div.innerHTML = `
+                <div class="avatar">${avatar}</div>
+                <div class="bubble">
+                    ${formatContent(msg.content)}
+                    <span class="time">${formatTime(msg.timestamp)}</span>
+                </div>
+            `;
+            
+            els.messages.appendChild(div);
+            els.messages.scrollTop = els.messages.scrollHeight;
+        }
+        
+        function formatContent(content) {
+            // Convert newlines to <br>
+            let html = content.replace(/\n/g, '<br>');
+            
+            // Convert schedule format to structured display
+            if (content.includes('•') && content.includes('-')) {
+                // Already formatted
+            }
+            
+            return html;
+        }
+        
+        function formatTime(iso) {
+            const date = new Date(iso);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        
+        // ============================================
+        // UPDATE UI
+        // ============================================
+        function updateTaskCount() {
+            if (state.schedule) {
+                state.taskCount = state.schedule.length;
+            } else {
+                state.taskCount = 0;
+            }
+            els.taskCount.textContent = state.taskCount;
+        }
+        
+        function setStatus(status, text) {
+            els.statusDot.className = `status-dot ${status}`;
+            els.statusText.textContent = text;
+        }
+        
+        // ============================================
+        // API KEY
+        // ============================================
+        function saveApiKey() {
+            const key = els.apiKeyInput.value.trim();
+            if (!key) {
+                els.apiStatus.textContent = '⚠️ Please enter a valid API key';
+                els.apiStatus.className = 'api-status error';
+                return;
+            }
+            
+            state.apiKey = key;
+            localStorage.setItem('focus_api_key', key);
+            els.apiSection.classList.add('has-key');
+            els.apiStatus.textContent = '✅ API key saved!';
+            els.apiStatus.className = 'api-status ready';
+        }
+        
+        // ============================================
+        // CLEAR CHAT
+        // ============================================
+        function clearChat() {
+            if (confirm('Clear all messages?')) {
+                state.messages = [];
+                localStorage.setItem('focus_messages', JSON.stringify([]));
+                els.messages.querySelectorAll('.message').forEach(el => el.remove());
+                els.emptyState.classList.remove('hidden');
+                updateTaskCount();
+            }
+        }
+        
+        // ============================================
+        // AUTO-RESIZE TEXTAREA
+        // ============================================
+        function setupAutoResize() {
+            els.userInput.addEventListener('input', () => {
+                els.userInput.style.height = 'auto';
+                els.userInput.style.height = Math.min(els.userInput.scrollHeight, 120) + 'px';
+            });
+        }
+        
+        // ============================================
+        // PWA INSTALL
+        // ============================================
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            els.installBtn.style.display = 'block';
+        });
+        
+        async function installPWA() {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const result = await deferredPrompt.userChoice;
+                if (result.outcome === 'accepted') {
+                    console.log('✅ App installed');
+                }
+                deferredPrompt = null;
+                els.installBtn.style.display = 'none';
+            } else {
+                // Fallback: show instructions
+                alert('📱 To install:\n• Chrome: Menu → "Add to Home Screen"\n• Safari: Share → "Add to Home Screen"');
+            }
+        }
+        
+        // ============================================
+        // START
+        // ============================================
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
