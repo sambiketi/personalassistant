@@ -1,19 +1,23 @@
 ﻿from fastapi import FastAPI, Form, Response, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from twilio.twiml.messaging_response import MessagingResponse
-from app_state import APP_STATE, UserSession, Task
-from ai_engine import UniversalScheduler
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 import os
 import uvicorn
 import json
-import asyncio
+import uuid
+from datetime import datetime
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+from redis_client import redis_client
+from llm_factory import LLMFactory
+from telegram_handler import TelegramHandler
 
-app = FastAPI()
+load_dotenv()
 
-# Add CORS middleware
+app = FastAPI(title="Focus Companion API", version="1.0.0")
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,220 +26,252 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize scheduler with DeepSeek
-scheduler = UniversalScheduler(provider_model="deepseek-chat")
+# Serve static files
+frontend_dir = os.path.join(os.path.dirname(__file__))
+app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
-def get_chat_id():
-    """Read chat ID from file"""
-    try:
-        with open("chat_id.txt", "r") as f:
-            return f.read().strip()
-    except:
-        return None
-
+# Serve HTML files
 @app.get("/")
-async def root():
-    return {
-        "message": "Focus Companion API", 
-        "status": "running", 
-        "llm": "DeepSeek",
-        "platforms": ["telegram", "whatsapp"]
-    }
+async def serve_index():
+    return FileResponse("index.html")
 
-@app.get("/api/platforms/status")
-async def get_platforms_status():
-    """Get status of all communication platforms"""
-    return {
-        "telegram": {
-            "configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-            "chat_id": get_chat_id() is not None
-        },
-        "whatsapp": {
-            "configured": bool(os.getenv("TWILIO_ACCOUNT_SID")),
-            "running": False
-        }
-    }
+@app.get("/setup.html")
+async def serve_setup():
+    return FileResponse("setup.html")
 
-@app.post("/api/register")
-async def register_user(request_data: dict):
-    """Register user with communication channels"""
-    try:
-        user_id = request_data.get("user_id")
-        telegram_chat_id = request_data.get("telegram_chat_id")
-        whatsapp_number = request_data.get("whatsapp_number")
-        
-        if not user_id:
-            return {"status": "error", "message": "user_id required"}
-        
-        # Store in app state
-        if user_id not in APP_STATE:
-            APP_STATE[user_id] = UserSession(
-                phone_number=whatsapp_number or "",
-                api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-                provider="deepseek",
-                unsnoozables=[],
-                tasks=[]
-            )
-        
-        print(f"✅ User registered: {user_id}")
-        print(f"   Telegram: {telegram_chat_id}")
-        print(f"   WhatsApp: {whatsapp_number}")
-        
-        return {
-            "status": "success",
-            "message": f"User {user_id} registered",
-            "telegram": bool(telegram_chat_id),
-            "whatsapp": bool(whatsapp_number)
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@app.get("/dashboard.html")
+async def serve_dashboard():
+    return FileResponse("dashboard.html")
 
-@app.post("/api/schedule")
-async def generate_schedule(request_data: dict):
-    """Generate a schedule from a text prompt using DeepSeek"""
-    try:
-        prompt = request_data.get("prompt", "")
-        unsnoozables = request_data.get("unsnoozables", [])
-        
-        if not prompt:
-            return {"status": "error", "message": "No prompt provided"}
-        
-        schedule = scheduler.generate_schedule(prompt, unsnoozables)
-        return {"status": "success", "schedule": schedule.model_dump()}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@app.get("/manifest.json")
+async def serve_manifest():
+    return FileResponse("manifest.json")
 
-@app.post("/api/schedule/send")
-async def generate_and_send_schedule(request_data: dict):
-    """Generate schedule and send via configured platforms"""
-    try:
-        prompt = request_data.get("prompt", "")
-        unsnoozables = request_data.get("unsnoozables", [])
-        user_id = request_data.get("user_id", "default")
-        platforms = request_data.get("platforms", ["telegram", "whatsapp"])
-        
-        if not prompt:
-            return {"status": "error", "message": "No prompt provided"}
-        
-        # Generate schedule
-        schedule = scheduler.generate_schedule(prompt, unsnoozables)
-        schedule_dict = schedule.model_dump()
-        
-        results = {}
-        
-        # Send to Telegram
-        if "telegram" in platforms:
-            # Get chat ID from file
-            chat_id = get_chat_id()
-            
-            if chat_id:
-                token = os.getenv("TELEGRAM_BOT_TOKEN")
-                if token:
-                    import requests
-                    url = f"https://api.telegram.org/bot{token}/sendMessage"
-                    
-                    # Format schedule message
-                    message = "📅 *YOUR DAILY SCHEDULE*\n\n"
-                    for task in schedule_dict.get("tasks", []):
-                        icon = "🔒" if task.get("is_unsnoozable") else "📌"
-                        message += f"{icon} *{task.get('start_time')} - {task.get('end_time')}*\n"
-                        message += f"   {task.get('task_name')}\n\n"
-                    
-                    message += "Reply with: START, SNOOZE, or DONE"
-                    
-                    payload = {
-                        "chat_id": chat_id,
-                        "text": message,
-                        "parse_mode": "Markdown"
-                    }
-                    
-                    response = requests.post(url, json=payload)
-                    result = response.json()
-                    results["telegram"] = {"success": result.get("ok", False)}
-                else:
-                    results["telegram"] = {"success": False, "error": "No Telegram token"}
-            else:
-                results["telegram"] = {"success": False, "error": "No chat_id found. Run get_chat_id.py"}
-        
-        return {
-            "status": "success", 
-            "schedule": schedule_dict,
-            "sent_to": results
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@app.get("/sw.js")
+async def serve_sw():
+    return FileResponse("sw.js")
 
-@app.post("/api/whatsapp")
-async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
-    """Handle WhatsApp incoming messages (Twilio webhook)"""
-    try:
-        user_phone = From.replace("whatsapp:", "").strip()
-        command = Body.strip().upper()
-        
-        resp = MessagingResponse()
-        session = APP_STATE.get(user_phone)
-        
-        if not session or not session.tasks:
-            resp.message("Welcome! You have no active tasks scheduled. Send your schedule via Telegram or the web app.")
-            return Response(content=str(resp), media_type="application/xml")
-        
-        current_task = session.tasks[0]
-        
-        if command == "START":
-            current_task.status = "IN_PROGRESS"
-            resp.message(f"✅ Started: {current_task.name}. Focus up!")
-        elif command == "SNOOZE":
-            if current_task.is_unsnoozable:
-                resp.message(f"🔒 {current_task.name} is UNSNOOZABLE! Cannot delay.")
-            else:
-                current_task.status = "SNOOZED"
-                resp.message(f"⏸️ Pushed {current_task.name} by 10 minutes.")
-        elif command == "DONE":
-            current_task.status = "COMPLETED"
-            session.tasks.pop(0)
-            next_msg = f" Up next: {session.tasks[0].name}" if session.tasks else " You cleared all tasks for today!"
-            resp.message(f"✅ Task marked DONE!{next_msg}")
-        else:
-            resp.message("Reply: START, SNOOZE, or DONE")
-        
-        return Response(content=str(resp), media_type="application/xml")
-    except Exception as e:
-        print(f"❌ WhatsApp webhook error: {e}")
-        resp = MessagingResponse()
-        resp.message("Error processing request. Please try again.")
-        return Response(content=str(resp), media_type="application/xml")
+# Initialize handlers
+telegram = TelegramHandler()
 
-@app.post("/api/initialize")
-async def initialize_session(data: dict):
-    """Initialize a user session with tasks"""
+# ==================== USER MANAGEMENT ====================
+
+@app.post("/api/user/create")
+async def create_user(data: dict):
     try:
         phone = data.get("phone")
-        tasks_data = data.get("tasks", [])
-        
         if not phone:
             return {"status": "error", "message": "Phone number required"}
         
-        tasks = []
-        for task_data in tasks_data:
-            tasks.append(Task(
-                name=task_data.get("name", ""),
-                start_time=task_data.get("start_time", ""),
-                end_time=task_data.get("end_time", ""),
-                is_unsnoozable=task_data.get("is_unsnoozable", False)
-            ))
+        user_id = str(uuid.uuid4())
         
-        session = UserSession(
-            phone_number=phone,
-            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-            provider="deepseek",
-            unsnoozables=[t.name for t in tasks if t.is_unsnoozable],
-            tasks=tasks
-        )
+        print(f"📝 Creating user: {user_id}")
+        print(f"   Phone: {phone}")
         
-        APP_STATE[phone] = session
-        return {"status": "success", "message": f"Session initialized for {phone}"}
+        redis_client.save_user(user_id, {
+            "phone": phone,
+            "created_at": datetime.now().isoformat(),
+            "llm_provider": data.get("llm_provider", "deepseek"),
+            "llm_api_key": data.get("llm_api_key", ""),
+            "llm_model": data.get("llm_model", "")
+        })
+        
+        print(f"   ✅ User created successfully")
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "message": "User created successfully"
+        }
+    except Exception as e:
+        print(f"❌ Error creating user: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/user/{user_id}")
+async def get_user(user_id: str):
+    try:
+        user = redis_client.get_user(user_id)
+        if not user:
+            return {"status": "error", "message": "User not found"}
+        return {"status": "success", "user": user}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+# ==================== LLM CONFIG ====================
+
+@app.post("/api/llm/config")
+async def configure_llm(data: dict):
+    try:
+        user_id = data.get("user_id")
+        provider = data.get("provider")
+        api_key = data.get("api_key")
+        model = data.get("model", "")
+        
+        print(f"🔧 Configuring LLM for user: {user_id}")
+        print(f"   Provider: {provider}")
+        print(f"   API Key: {api_key[:15]}..." if api_key else "   API Key: None")
+        print(f"   Model: {model}")
+        
+        if not user_id or not provider or not api_key:
+            return {"status": "error", "message": "Missing required fields"}
+        
+        # Save config
+        config_data = {
+            "llm_provider": provider,
+            "llm_api_key": api_key,
+            "llm_model": model
+        }
+        
+        redis_client.save_user_config(user_id, config_data)
+        
+        # Verify it was saved
+        saved = redis_client.get_user_config(user_id)
+        print(f"   ✅ Config saved: {saved}")
+        
+        return {
+            "status": "success",
+            "message": f"LLM configured: {provider}",
+            "provider": provider
+        }
+    except Exception as e:
+        print(f"❌ Error configuring LLM: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/llm/config/{user_id}")
+async def get_llm_config(user_id: str):
+    try:
+        config = redis_client.get_user_config(user_id)
+        if not config:
+            return {"status": "error", "message": "Config not found"}
+        return {"status": "success", "config": config}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==================== TELEGRAM CONNECTION ====================
+
+@app.post("/api/telegram/connect")
+async def connect_telegram(data: dict):
+    try:
+        user_id = data.get("user_id")
+        phone = data.get("phone")
+        
+        if not user_id:
+            if not phone:
+                return {"status": "error", "message": "Phone number required"}
+            user_id = str(uuid.uuid4())
+            redis_client.save_user(user_id, {"phone": phone})
+        
+        redis_client.set_pending_connect(user_id)
+        
+        bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "P_asst_bot")
+        deep_link = f"https://t.me/{bot_username}?start={user_id}"
+        
+        return {
+            "status": "success",
+            "deep_link": deep_link,
+            "user_id": user_id,
+            "message": "Click the link to connect Telegram"
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/telegram/status/{user_id}")
+async def check_telegram_status(user_id: str):
+    try:
+        connected = redis_client.is_telegram_connected(user_id)
+        chat_id = redis_client.get_telegram_chat_id(user_id)
+        
+        return {
+            "connected": connected,
+            "user_id": user_id,
+            "chat_id": chat_id
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==================== SCHEDULE MANAGEMENT ====================
+
+@app.post("/api/schedule/generate")
+async def generate_schedule(data: dict):
+    try:
+        user_id = data.get("user_id")
+        prompt = data.get("prompt")
+        unsnoozables = data.get("unsnoozables", [])
+        
+        print(f"📅 Generating schedule for: {user_id}")
+        print(f"   Prompt: {prompt[:50]}..." if prompt else "   Prompt: None")
+        
+        if not user_id or not prompt:
+            return {"status": "error", "message": "Missing required fields"}
+        
+        user_config = redis_client.get_user_config(user_id)
+        print(f"   Config from Redis: {user_config}")
+        
+        if not user_config:
+            return {"status": "error", "message": "LLM not configured. Please setup first."}
+        
+        llm = LLMFactory.create_llm(
+            provider=user_config.get("llm_provider", "deepseek"),
+            api_key=user_config.get("llm_api_key"),
+            model=user_config.get("llm_model", "")
+        )
+        
+        schedule = llm.generate_schedule(prompt, unsnoozables)
+        redis_client.save_schedule(user_id, schedule.model_dump())
+        
+        return {
+            "status": "success",
+            "schedule": schedule.model_dump()
+        }
+    except Exception as e:
+        print(f"❌ Error generating schedule: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/schedule/{user_id}")
+async def get_schedule(user_id: str):
+    try:
+        schedule = redis_client.get_schedule(user_id)
+        if not schedule:
+            return {"status": "success", "schedule": None}
+        return {"status": "success", "schedule": schedule}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==================== TELEGRAM WEBHOOK ====================
+
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+        return await telegram.handle_webhook(data)
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return {"ok": False}
+
+# ==================== HEALTH CHECK ====================
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "redis": redis_client.ping(),
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/api")
+async def api_root():
+    return {
+        "message": "Focus Companion API",
+        "status": "running",
+        "version": "1.0.0",
+        "features": ["multi-llm", "telegram-deep-link", "redis-persistence"]
+    }
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        reload=os.getenv("DEBUG", "True").lower() == "true"
+    )
