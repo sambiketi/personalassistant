@@ -1,0 +1,4304 @@
+﻿==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\api\routes.py
+==================================================
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from typing import Optional, List, Dict
+from datetime import datetime
+
+from app.core.agent import FocusAgent, AgentResponse, Schedule
+from app.models.database import Database
+from app.services.deepseek import DeepSeekService
+
+router = APIRouter()
+
+# Initialize services
+db = Database()
+deepseek = DeepSeekService()
+
+# Agent instance (created per request)
+def get_agent(user_id: str) -> FocusAgent:
+    return FocusAgent(db, deepseek)
+
+# ==========================================
+# REQUEST/ RESPONSE MODELS
+# ==========================================
+
+class MessageRequest(BaseModel):
+    message: str
+    user_id: str = "default_user"
+
+class ScheduleRequest(BaseModel):
+    user_id: str
+    date: Optional[str] = None
+    description: str
+
+class GoalRequest(BaseModel):
+    user_id: str
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[int] = 3
+    target_date: Optional[str] = None
+
+class HabitRequest(BaseModel):
+    user_id: str
+    name: str
+    description: Optional[str] = None
+    frequency: str = "daily"
+
+class TaskLogRequest(BaseModel):
+    user_id: str
+    task_name: str
+    status: str  # completed, skipped, postponed
+    date: str
+    notes: Optional[str] = None
+
+class ApiKeyRequest(BaseModel):
+    user_id: str
+    api_key: str
+
+# ==========================================
+# MAIN AGENT ENDPOINT
+# ==========================================
+
+@router.post("/agent/process")
+async def process_message(request: MessageRequest):
+    """Main agent endpoint - process any user message"""
+    try:
+        agent = get_agent(request.user_id)
+        response = agent.process(request.user_id, request.message)
+        
+        return {
+            "success": True,
+            "response": {
+                "message": response.message,
+                "intent": response.intent.value,
+                "schedule": response.schedule.to_dict() if response.schedule else None,
+                "suggestions": response.suggestions,
+                "reasoning": response.reasoning,
+                "changed_tasks": response.changed_tasks
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# SCHEDULE ENDPOINTS
+# ==========================================
+
+@router.get("/schedule/{user_id}")
+async def get_schedule(user_id: str, date: Optional[str] = None):
+    """Get schedule for a date"""
+    if not date:
+        date = datetime.now().strftime('%Y-%m-%d')
+    
+    try:
+        user = db.get_or_create_user(user_id)
+        schedule = db.get_schedule(user['id'], date)
+        
+        return {
+            "success": True,
+            "date": date,
+            "schedule": schedule or []
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/schedule")
+async def create_schedule(request: ScheduleRequest):
+    """Create a new schedule"""
+    try:
+        agent = get_agent(request.user_id)
+        response = agent.process(
+            request.user_id,
+            f"Create a schedule for {request.date or 'today'}: {request.description}"
+        )
+        
+        return {
+            "success": True,
+            "schedule": response.schedule.to_dict() if response.schedule else None,
+            "message": response.message
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# GOAL ENDPOINTS
+# ==========================================
+
+@router.get("/goals/{user_id}")
+async def get_goals(user_id: str, status: Optional[str] = None):
+    """Get user goals"""
+    try:
+        user = db.get_or_create_user(user_id)
+        goals = db.get_goals(user['id'], status)
+        
+        return {
+            "success": True,
+            "goals": goals
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/goal")
+async def create_goal(request: GoalRequest):
+    """Create a new goal"""
+    try:
+        user = db.get_or_create_user(request.user_id)
+        
+        goal_id = db.create_goal(user['id'], {
+            'title': request.title,
+            'description': request.description,
+            'category': request.category,
+            'priority': request.priority,
+            'target_date': request.target_date
+        })
+        
+        return {
+            "success": True,
+            "goal_id": goal_id,
+            "message": f"Goal '{request.title}' created successfully!"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/goal/{goal_id}/progress")
+async def update_goal_progress(goal_id: int, progress: float):
+    """Update goal progress"""
+    try:
+        db.update_goal_progress(goal_id, progress)
+        return {
+            "success": True,
+            "message": f"Progress updated to {progress}%"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/goal/{goal_id}/complete")
+async def complete_goal(goal_id: int):
+    """Mark goal as completed"""
+    try:
+        db.complete_goal(goal_id)
+        return {
+            "success": True,
+            "message": "Goal completed! ðŸŽ‰"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# HABIT ENDPOINTS
+# ==========================================
+
+@router.get("/habits/{user_id}")
+async def get_habits(user_id: str, status: str = "active"):
+    """Get user habits"""
+    try:
+        user = db.get_or_create_user(user_id)
+        habits = db.get_habits(user['id'], status)
+        
+        return {
+            "success": True,
+            "habits": habits
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/habit")
+async def create_habit(request: HabitRequest):
+    """Create a new habit"""
+    try:
+        user = db.get_or_create_user(request.user_id)
+        
+        habit_id = db.create_habit(user['id'], {
+            'name': request.name,
+            'description': request.description,
+            'frequency': request.frequency
+        })
+        
+        return {
+            "success": True,
+            "habit_id": habit_id,
+            "message": f"Habit '{request.name}' created!"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/habit/{habit_id}/log")
+async def log_habit(habit_id: int, date: Optional[str] = None, completed: bool = True):
+    """Log habit completion"""
+    try:
+        if not date:
+            date = datetime.now().strftime('%Y-%m-%d')
+        
+        db.log_habit(habit_id, date, completed)
+        
+        return {
+            "success": True,
+            "message": f"Habit logged for {date}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# TASK HISTORY ENDPOINTS
+# ==========================================
+
+@router.post("/task/log")
+async def log_task(request: TaskLogRequest):
+    """Log task for agent learning"""
+    try:
+        user = db.get_or_create_user(request.user_id)
+        
+        db.log_task(user['id'], {
+            'task_name': request.task_name,
+            'status': request.status,
+            'date': request.date,
+            'notes': request.notes
+        })
+        
+        return {
+            "success": True,
+            "message": "Task logged successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/task/patterns/{user_id}")
+async def get_task_patterns(user_id: str, days: int = 30):
+    """Get task patterns for learning"""
+    try:
+        user = db.get_or_create_user(user_id)
+        patterns = db.get_task_patterns(user['id'], days)
+        
+        return {
+            "success": True,
+            "patterns": patterns
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# USER ENDPOINTS
+# ==========================================
+
+@router.post("/user/init")
+async def init_user(user_id: str):
+    """Initialize or get user"""
+    try:
+        user = db.get_or_create_user(user_id)
+        return {
+            "success": True,
+            "user": user
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/user/apikey")
+async def save_api_key(request: ApiKeyRequest):
+    """Save DeepSeek API key"""
+    try:
+        db.save_api_key(request.user_id, request.api_key)
+        return {
+            "success": True,
+            "message": "API key saved successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/user/apikey/{user_id}")
+async def get_api_key(user_id: str):
+    """Get user's API key (hidden)"""
+    try:
+        api_key = db.get_api_key(user_id)
+        return {
+            "success": True,
+            "has_key": bool(api_key)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# ANALYTICS ENDPOINTS
+# ==========================================
+
+@router.get("/analytics/{user_id}")
+async def get_analytics(user_id: str):
+    """Get user analytics"""
+    try:
+        user = db.get_or_create_user(user_id)
+        agent = get_agent(user_id)
+        response = agent.handle_show_analytics()
+        
+        return {
+            "success": True,
+            "analytics": {
+                "message": response.message,
+                "patterns": db.get_task_patterns(user['id'])
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/progress/{user_id}")
+async def get_progress(user_id: str):
+    """Get user progress"""
+    try:
+        user = db.get_or_create_user(user_id)
+        agent = get_agent(user_id)
+        response = agent.handle_show_progress()
+        
+        return {
+            "success": True,
+            "progress": response.message
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\api\__init__.py
+==================================================
+# API package
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\core\agent.py
+==================================================
+import json
+import re
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+
+class Intent(Enum):
+    CREATE_SCHEDULE = "create_schedule"
+    UPDATE_SCHEDULE = "update_schedule"
+    HANDLE_EMERGENCY = "handle_emergency"
+    SKIP_TASK = "skip_task"
+    POSTPONE_TASK = "postpone_task"
+    ADD_GOAL = "add_goal"
+    UPDATE_GOAL = "update_goal"
+    LOG_HABIT = "log_habit"
+    SHOW_SCHEDULE = "show_schedule"
+    SHOW_PROGRESS = "show_progress"
+    SHOW_ANALYTICS = "show_analytics"
+    GENERAL_CHAT = "general_chat"
+
+@dataclass
+class Task:
+    id: str
+    name: str
+    start_time: str  # HH:MM
+    end_time: str    # HH:MM
+    duration: int    # minutes
+    priority: int    # 1-5
+    status: str      # pending, in_progress, completed, skipped, postponed
+    category: str    # work, health, learning, personal
+    notes: str = ""
+    is_flexible: bool = True
+    depends_on: List[str] = field(default_factory=list)
+
+@dataclass
+class Schedule:
+    date: str  # YYYY-MM-DD
+    tasks: List[Task]
+    total_hours: float = 0
+    completion_rate: float = 0
+    
+    def to_dict(self) -> Dict:
+        return {
+            'date': self.date,
+            'tasks': [{
+                'id': t.id,
+                'name': t.name,
+                'start_time': t.start_time,
+                'end_time': t.end_time,
+                'duration': t.duration,
+                'priority': t.priority,
+                'status': t.status,
+                'category': t.category,
+                'notes': t.notes
+            } for t in self.tasks],
+            'total_hours': self.total_hours,
+            'completion_rate': self.completion_rate
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'Schedule':
+        tasks = [Task(**t) for t in data.get('tasks', [])]
+        return cls(
+            date=data['date'],
+            tasks=tasks,
+            total_hours=data.get('total_hours', 0),
+            completion_rate=data.get('completion_rate', 0)
+        )
+
+@dataclass
+class AgentResponse:
+    intent: Intent
+    message: str
+    schedule: Optional[Schedule] = None
+    action_taken: Optional[Dict] = None
+    suggestions: List[str] = field(default_factory=list)
+    reasoning: str = ""
+    changed_tasks: List[str] = field(default_factory=list)
+
+class FocusAgent:
+    """Main agent engine for dynamic scheduling"""
+    
+    def __init__(self, db, deepseek_service):
+        self.db = db
+        self.deepseek = deepseek_service
+        self.current_schedule: Optional[Schedule] = None
+        self.user_id: Optional[str] = None
+        self.user_data: Optional[Dict] = None
+    
+    def process(self, user_id: str, user_input: str) -> AgentResponse:
+        """Main entry point - process user input and return agent response"""
+        # 1. Load user context
+        self.user_id = user_id
+        self.user_data = self.db.get_or_create_user(user_id)
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # 2. Load current schedule
+        schedule_data = self.db.get_schedule(self.user_data['id'], today)
+        if schedule_data:
+            self.current_schedule = Schedule.from_dict(schedule_data)
+        
+        # 3. Detect intent
+        intent, entities = self.detect_intent(user_input)
+        
+        # 4. Process based on intent
+        if intent == Intent.CREATE_SCHEDULE:
+            return self.handle_create_schedule(user_input, entities)
+        elif intent == Intent.UPDATE_SCHEDULE:
+            return self.handle_update_schedule(user_input, entities)
+        elif intent == Intent.HANDLE_EMERGENCY:
+            return self.handle_emergency(user_input, entities)
+        elif intent == Intent.SKIP_TASK:
+            return self.handle_skip_task(user_input, entities)
+        elif intent == Intent.POSTPONE_TASK:
+            return self.handle_postpone_task(user_input, entities)
+        elif intent == Intent.ADD_GOAL:
+            return self.handle_add_goal(user_input, entities)
+        elif intent == Intent.SHOW_SCHEDULE:
+            return self.handle_show_schedule()
+        elif intent == Intent.SHOW_PROGRESS:
+            return self.handle_show_progress()
+        elif intent == Intent.SHOW_ANALYTICS:
+            return self.handle_show_analytics()
+        else:
+            return self.handle_general_chat(user_input)
+    
+    # ==========================================
+    # INTENT DETECTION
+    # ==========================================
+    
+    def detect_intent(self, user_input: str) -> Tuple[Intent, Dict]:
+        """Detect user intent using pattern matching + AI"""
+        input_lower = user_input.lower()
+        entities = {}
+        
+        # Pattern-based detection (fast path)
+        patterns = {
+            Intent.CREATE_SCHEDULE: [
+                r'schedule', r'plan', r'tomorrow', r'today',
+                r'wake up', r'waking', r'morning', r'day'
+            ],
+            Intent.UPDATE_SCHEDULE: [
+                r'change', r'move', r'shift', r'adjust', r'update',
+                r'reschedule', r'rearrange'
+            ],
+            Intent.HANDLE_EMERGENCY: [
+                r'emergency', r'urgent', r'critical', r'immediate',
+                r'sudden', r'unexpected', r'panic'
+            ],
+            Intent.SKIP_TASK: [
+                r'skip', r'cancel', r'drop', r'remove',
+                r'don\'t want', r'not doing'
+            ],
+            Intent.POSTPONE_TASK: [
+                r'postpone', r'delay', r'later', r'push back',
+                r'reschedule for later'
+            ],
+            Intent.ADD_GOAL: [
+                r'goal', r'aim', r'objective', r'target',
+                r'want to achieve', r'plan to'
+            ],
+            Intent.SHOW_SCHEDULE: [
+                r'what.*schedule', r'show.*schedule',
+                r'display.*schedule', r'current schedule'
+            ],
+            Intent.SHOW_PROGRESS: [
+                r'progress', r'how am i doing', r'status',
+                r'check in', r'update'
+            ]
+        }
+        
+        # Check patterns
+        for intent, patterns_list in patterns.items():
+            for pattern in patterns_list:
+                if re.search(pattern, input_lower):
+                    # Extract entities
+                    if intent == Intent.CREATE_SCHEDULE:
+                        entities['text'] = user_input
+                    elif intent == Intent.SKIP_TASK:
+                        # Try to extract task name
+                        for word in ['workout', 'exercise', 'study', 'code', 'meeting', 'call']:
+                            if word in input_lower:
+                                entities['task'] = word
+                                break
+                    elif intent == Intent.HANDLE_EMERGENCY:
+                        # Extract emergency description
+                        entities['description'] = user_input
+                    elif intent == Intent.ADD_GOAL:
+                        entities['description'] = user_input
+                    
+                    return intent, entities
+        
+        # If no pattern matches, use AI for intent detection
+        return self.detect_intent_ai(user_input)
+    
+    def detect_intent_ai(self, user_input: str) -> Tuple[Intent, Dict]:
+        """Use DeepSeek to detect intent for complex queries"""
+        prompt = f"""
+        Analyze this user input and determine the intent:
+        "{user_input}"
+        
+        Possible intents:
+        - CREATE_SCHEDULE: User wants to create/plan a schedule
+        - UPDATE_SCHEDULE: User wants to change existing schedule
+        - HANDLE_EMERGENCY: User has an urgent task
+        - SKIP_TASK: User wants to skip a task
+        - POSTPONE_TASK: User wants to delay a task
+        - ADD_GOAL: User wants to add a goal
+        - SHOW_SCHEDULE: User wants to see schedule
+        - SHOW_PROGRESS: User wants progress update
+        - GENERAL_CHAT: General conversation
+        
+        Return only the intent name.
+        """
+        
+        response = self.deepseek.generate(prompt)
+        try:
+            intent_name = response.strip().upper()
+            intent = Intent[intent_name]
+            return intent, {'text': user_input}
+        except (KeyError, ValueError):
+            return Intent.GENERAL_CHAT, {'text': user_input}
+    
+    # ==========================================
+    # SCHEDULE HANDLERS
+    # ==========================================
+    
+    def handle_create_schedule(self, user_input: str, entities: Dict) -> AgentResponse:
+        """Create a new schedule from user description"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Get user preferences
+        wake_time = self.user_data.get('wake_time', '06:00')
+        sleep_time = self.user_data.get('sleep_time', '22:00')
+        
+        # Build prompt for DeepSeek
+        prompt = f"""
+        Create a detailed daily schedule based on this user request:
+        "{user_input}"
+        
+        User preferences:
+        - Wake time: {wake_time}
+        - Sleep time: {sleep_time}
+        - Current date: {today}
+        
+        Return schedule as JSON with tasks containing:
+        - id: unique task id
+        - name: task name
+        - start_time: HH:MM
+        - end_time: HH:MM
+        - duration: minutes
+        - priority: 1-5 (5 highest)
+        - category: work, health, learning, personal
+        - is_flexible: true/false
+        
+        Also include:
+        - reasoning: explanation of schedule choices
+        - suggestions: tips for success
+        """
+        
+        response = self.deepseek.generate(prompt)
+        
+        try:
+            # Parse AI response
+            data = json.loads(response)
+            tasks = [Task(**t) for t in data.get('tasks', [])]
+            
+            schedule = Schedule(
+                date=today,
+                tasks=tasks,
+                total_hours=sum(t.duration for t in tasks) / 60
+            )
+            
+            # Save to database
+            self.db.save_schedule(
+                self.user_data['id'],
+                today,
+                schedule.to_dict()
+            )
+            
+            self.current_schedule = schedule
+            
+            return AgentResponse(
+                intent=Intent.CREATE_SCHEDULE,
+                message=f"âœ… Schedule created for {today}!\n\n{self.format_schedule(schedule)}",
+                schedule=schedule,
+                suggestions=data.get('suggestions', []),
+                reasoning=data.get('reasoning', '')
+            )
+            
+        except json.JSONDecodeError:
+            # Fallback - return raw response
+            return AgentResponse(
+                intent=Intent.CREATE_SCHEDULE,
+                message=response,
+                schedule=None
+            )
+    
+    def handle_update_schedule(self, user_input: str, entities: Dict) -> AgentResponse:
+        """Update existing schedule based on user request"""
+        if not self.current_schedule:
+            return AgentResponse(
+                intent=Intent.UPDATE_SCHEDULE,
+                message="No active schedule found. Let me create one for you! ðŸ—“ï¸"
+            )
+        
+        # Build prompt for DeepSeek
+        current_schedule = self.current_schedule.to_dict()
+        
+        prompt = f"""
+        User wants to update their schedule:
+        "{user_input}"
+        
+        Current schedule:
+        {json.dumps(current_schedule, indent=2)}
+        
+        Update the schedule based on the user request.
+        Return the updated schedule in the same JSON format.
+        Also include:
+        - reasoning: explanation of changes made
+        - changed_tasks: list of task names that were modified
+        """
+        
+        response = self.deepseek.generate(prompt)
+        
+        try:
+            data = json.loads(response)
+            tasks = [Task(**t) for t in data.get('tasks', [])]
+            
+            updated_schedule = Schedule(
+                date=self.current_schedule.date,
+                tasks=tasks,
+                total_hours=sum(t.duration for t in tasks) / 60
+            )
+            
+            # Save to database
+            self.db.save_schedule(
+                self.user_data['id'],
+                self.current_schedule.date,
+                updated_schedule.to_dict()
+            )
+            
+            self.current_schedule = updated_schedule
+            
+            return AgentResponse(
+                intent=Intent.UPDATE_SCHEDULE,
+                message=f"âœ… Schedule updated!\n\n{self.format_schedule(updated_schedule)}",
+                schedule=updated_schedule,
+                changed_tasks=data.get('changed_tasks', []),
+                reasoning=data.get('reasoning', '')
+            )
+            
+        except json.JSONDecodeError:
+            return AgentResponse(
+                intent=Intent.UPDATE_SCHEDULE,
+                message="I couldn't update the schedule. Let me try again with more details."
+            )
+    
+    def handle_emergency(self, user_input: str, entities: Dict) -> AgentResponse:
+        """Handle emergency task insertion"""
+        if not self.current_schedule:
+            return AgentResponse(
+                intent=Intent.HANDLE_EMERGENCY,
+                message="No active schedule. Creating one for you with the emergency included!"
+            )
+        
+        prompt = f"""
+        Emergency situation from user:
+        "{user_input}"
+        
+        Current schedule:
+        {json.dumps(self.current_schedule.to_dict(), indent=2)}
+        
+        Insert this emergency task while minimizing disruption.
+        Consider:
+        1. Task priority (emergency is HIGHEST)
+        2. Which tasks can be shifted
+        3. Which tasks can be shortened
+        4. Protected time blocks (deep work, important meetings)
+        
+        Return updated schedule in JSON format.
+        Also include:
+        - reasoning: why you made these changes
+        - protected_tasks: tasks that were not changed
+        - suggestions: how to handle future emergencies
+        """
+        
+        response = self.deepseek.generate(prompt)
+        
+        try:
+            data = json.loads(response)
+            tasks = [Task(**t) for t in data.get('tasks', [])]
+            
+            updated_schedule = Schedule(
+                date=self.current_schedule.date,
+                tasks=tasks,
+                total_hours=sum(t.duration for t in tasks) / 60
+            )
+            
+            # Save to database
+            self.db.save_schedule(
+                self.user_data['id'],
+                self.current_schedule.date,
+                updated_schedule.to_dict()
+            )
+            
+            self.current_schedule = updated_schedule
+            
+            return AgentResponse(
+                intent=Intent.HANDLE_EMERGENCY,
+                message=f"ðŸš¨ Emergency handled!\n\n{self.format_schedule(updated_schedule)}",
+                schedule=updated_schedule,
+                suggestions=data.get('suggestions', []),
+                reasoning=data.get('reasoning', '')
+            )
+            
+        except json.JSONDecodeError:
+            return AgentResponse(
+                intent=Intent.HANDLE_EMERGENCY,
+                message="Emergency handling in progress. Let me re-optimize..."
+            )
+    
+    def handle_skip_task(self, user_input: str, entities: Dict) -> AgentResponse:
+        """Handle task skipping"""
+        if not self.current_schedule:
+            return AgentResponse(
+                intent=Intent.SKIP_TASK,
+                message="No schedule to skip tasks from. Let me create one!"
+            )
+        
+        task_name = entities.get('task', '').lower()
+        
+        # Find task to skip
+        task_to_skip = None
+        for task in self.current_schedule.tasks:
+            if task_name in task.name.lower() or task_name in task.category.lower():
+                task_to_skip = task
+                break
+        
+        if not task_to_skip and task_name:
+            # Try fuzzy match
+            for task in self.current_schedule.tasks:
+                if any(word in task.name.lower() for word in task_name.split()):
+                    task_to_skip = task
+                    break
+        
+        if not task_to_skip:
+            # Let AI decide
+            prompt = f"""
+            User wants to skip a task:
+            "{user_input}"
+            
+            Current schedule:
+            {json.dumps(self.current_schedule.to_dict(), indent=2)}
+            
+            Determine which task to skip and redistribute the time.
+            Return updated schedule in JSON format.
+            Also include reasoning for your choice.
+            """
+            
+            response = self.deepseek.generate(prompt)
+            try:
+                data = json.loads(response)
+                tasks = [Task(**t) for t in data.get('tasks', [])]
+                
+                updated_schedule = Schedule(
+                    date=self.current_schedule.date,
+                    tasks=tasks,
+                    total_hours=sum(t.duration for t in tasks) / 60
+                )
+                
+                self.current_schedule = updated_schedule
+                self.db.save_schedule(
+                    self.user_data['id'],
+                    self.current_schedule.date,
+                    updated_schedule.to_dict()
+                )
+                
+                return AgentResponse(
+                    intent=Intent.SKIP_TASK,
+                    message=f"âœ… Task skipped and time redistributed!\n\n{self.format_schedule(updated_schedule)}",
+                    schedule=updated_schedule,
+                    reasoning=data.get('reasoning', '')
+                )
+            except:
+                return AgentResponse(
+                    intent=Intent.SKIP_TASK,
+                    message="Which task would you like to skip? Please specify the task name."
+                )
+        
+        # Remove task and redistribute time
+        index = self.current_schedule.tasks.index(task_to_skip)
+        removed_task = self.current_schedule.tasks.pop(index)
+        
+        # Adjust subsequent tasks
+        for i in range(index, len(self.current_schedule.tasks)):
+            if i < len(self.current_schedule.tasks):
+                # Shift tasks earlier
+                current = self.current_schedule.tasks[i]
+                if i == index:
+                    current.start_time = removed_task.start_time
+                else:
+                    prev = self.current_schedule.tasks[i-1]
+                    current.start_time = prev.end_time
+                
+                # Recalculate end time
+                start = datetime.strptime(current.start_time, '%H:%M')
+                end = start + timedelta(minutes=current.duration)
+                current.end_time = end.strftime('%H:%M')
+        
+        # Update total hours
+        self.current_schedule.total_hours = sum(t.duration for t in self.current_schedule.tasks) / 60
+        
+        # Log for learning
+        self.db.log_task(self.user_data['id'], {
+            'task_name': removed_task.name,
+            'scheduled_time': removed_task.start_time,
+            'status': 'skipped',
+            'date': self.current_schedule.date,
+            'notes': f"Skipped task: {removed_task.name}"
+        })
+        
+        # Save updated schedule
+        self.db.save_schedule(
+            self.user_data['id'],
+            self.current_schedule.date,
+            self.current_schedule.to_dict()
+        )
+        
+        return AgentResponse(
+            intent=Intent.SKIP_TASK,
+            message=f"âœ… Skipped '{removed_task.name}'. Time has been redistributed.\n\n{self.format_schedule(self.current_schedule)}",
+            schedule=self.current_schedule,
+            changed_tasks=[removed_task.name],
+            reasoning=f"Skipped '{removed_task.name}' and shifted subsequent tasks earlier."
+        )
+    
+    def handle_postpone_task(self, user_input: str, entities: Dict) -> AgentResponse:
+        """Handle task postponing"""
+        if not self.current_schedule:
+            return AgentResponse(
+                intent=Intent.POSTPONE_TASK,
+                message="No schedule to postpone tasks from. Let me create one!"
+            )
+        
+        # Extract time from input
+        time_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', user_input, re.IGNORECASE)
+        new_time = None
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2) or 0)
+            ampm = time_match.group(3)
+            if ampm:
+                if ampm.lower() == 'pm' and hour != 12:
+                    hour += 12
+                elif ampm.lower() == 'am' and hour == 12:
+                    hour = 0
+            new_time = f"{hour:02d}:{minute:02d}"
+        
+        prompt = f"""
+        User wants to postpone a task:
+        "{user_input}"
+        {"New time suggestion: " + new_time if new_time else ""}
+        
+        Current schedule:
+        {json.dumps(self.current_schedule.to_dict(), indent=2)}
+        
+        Determine which task to postpone and when.
+        Return updated schedule in JSON format.
+        Also include reasoning.
+        """
+        
+        response = self.deepseek.generate(prompt)
+        
+        try:
+            data = json.loads(response)
+            tasks = [Task(**t) for t in data.get('tasks', [])]
+            
+            updated_schedule = Schedule(
+                date=self.current_schedule.date,
+                tasks=tasks,
+                total_hours=sum(t.duration for t in tasks) / 60
+            )
+            
+            self.current_schedule = updated_schedule
+            self.db.save_schedule(
+                self.user_data['id'],
+                self.current_schedule.date,
+                updated_schedule.to_dict()
+            )
+            
+            return AgentResponse(
+                intent=Intent.POSTPONE_TASK,
+                message=f"âœ… Task postponed!\n\n{self.format_schedule(updated_schedule)}",
+                schedule=updated_schedule,
+                reasoning=data.get('reasoning', '')
+            )
+        except:
+            return AgentResponse(
+                intent=Intent.POSTPONE_TASK,
+                message="I'll help you postpone a task. Please specify which task and when to reschedule it."
+            )
+    
+    # ==========================================
+    # GOAL HANDLERS
+    # ==========================================
+    
+    def handle_add_goal(self, user_input: str, entities: Dict) -> AgentResponse:
+        """Add a new goal with tracking"""
+        prompt = f"""
+        User wants to add a goal:
+        "{user_input}"
+        
+        Extract the goal details and create a structured goal.
+        Return JSON with:
+        - title: goal title
+        - description: detailed description
+        - category: health, career, learning, personal
+        - priority: 1-5 (5 highest)
+        - target_date: YYYY-MM-DD (if mentioned, else null)
+        - milestones: list of milestones to track progress
+        - suggestions: how to achieve this goal
+        """
+        
+        response = self.deepseek.generate(prompt)
+        
+        try:
+            data = json.loads(response)
+            
+            goal_id = self.db.create_goal(self.user_data['id'], {
+                'title': data.get('title', 'New Goal'),
+                'description': data.get('description', ''),
+                'category': data.get('category', 'personal'),
+                'priority': data.get('priority', 3),
+                'target_date': data.get('target_date')
+            })
+            
+            # Add milestones
+            for milestone in data.get('milestones', []):
+                self.db.add_milestone(goal_id, milestone)
+            
+            return AgentResponse(
+                intent=Intent.ADD_GOAL,
+                message=f"ðŸŽ¯ Goal added: '{data.get('title')}'\n\n{data.get('description', '')}\n\nðŸ’¡ {data.get('suggestions', '')}",
+                suggestions=data.get('suggestions', []),
+                reasoning=f"Created goal with {len(data.get('milestones', []))} milestones"
+            )
+            
+        except json.JSONDecodeError:
+            return AgentResponse(
+                intent=Intent.ADD_GOAL,
+                message="I'll help you set up your goal. Can you tell me more about what you want to achieve?"
+            )
+    
+    # ==========================================
+    # DISPLAY HANDLERS
+    # ==========================================
+    
+    def handle_show_schedule(self) -> AgentResponse:
+        """Show current schedule"""
+        if not self.current_schedule:
+            return AgentResponse(
+                intent=Intent.SHOW_SCHEDULE,
+                message="No active schedule. Let me create one for you! Just tell me about your day."
+            )
+        
+        return AgentResponse(
+            intent=Intent.SHOW_SCHEDULE,
+            message=f"ðŸ“… Your schedule for {self.current_schedule.date}:\n\n{self.format_schedule(self.current_schedule)}",
+            schedule=self.current_schedule
+        )
+    
+    def handle_show_progress(self) -> AgentResponse:
+        """Show progress on goals and tasks"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Get goals
+        goals = self.db.get_goals(self.user_data['id'], 'active')
+        
+        # Get task patterns
+        patterns = self.db.get_task_patterns(self.user_data['id'])
+        
+        # Get habits
+        habits = self.db.get_habits(self.user_data['id'])
+        
+        # Build progress report
+        messages = ["ðŸ“Š Your Progress Report:\n"]
+        
+        if goals:
+            messages.append("ðŸŽ¯ Goals:")
+            for goal in goals:
+                progress = goal.get('progress', 0)
+                bar = self.progress_bar(progress)
+                messages.append(f"  {bar} {goal['title']} ({progress:.0f}%)")
+            messages.append("")
+        
+        if habits:
+            messages.append("ðŸ”¥ Habits:")
+            for habit in habits:
+                streak = habit.get('current_streak', 0)
+                messages.append(f"  âœ… {habit['name']} - {streak} day streak")
+            messages.append("")
+        
+        if patterns.get('total', 0) > 0:
+            messages.append(f"ðŸ“ˆ Completion Rate: {patterns.get('completion_rate', 0):.0f}%")
+            
+            skipped = patterns.get('skipped', [])
+            if skipped:
+                messages.append("  âš ï¸ Frequently skipped: " + ", ".join([s[0] for s in skipped[:3]]))
+        
+        return AgentResponse(
+            intent=Intent.SHOW_PROGRESS,
+            message="\n".join(messages)
+        )
+    
+    def handle_show_analytics(self) -> AgentResponse:
+        """Show analytics"""
+        patterns = self.db.get_task_patterns(self.user_data['id'])
+        goals = self.db.get_goals(self.user_data['id'])
+        
+        message = f"""
+ðŸ“ˆ Analytics Summary:
+
+ðŸ“‹ Tasks tracked: {patterns.get('total', 0)}
+âœ… Completion rate: {patterns.get('completion_rate', 0):.0f}%
+
+{"ðŸ”´" if patterns.get('skipped') else "âœ…"} Skipped tasks: {len(patterns.get('skipped', []))}
+{"ðŸŸ¡" if patterns.get('postponed') else "âœ…"} Postponed tasks: {len(patterns.get('postponed', []))}
+
+ðŸŽ¯ Active goals: {len([g for g in goals if g.get('status') == 'active'])}
+ðŸ† Completed goals: {len([g for g in goals if g.get('status') == 'completed'])}
+        """
+        
+        return AgentResponse(
+            intent=Intent.SHOW_ANALYTICS,
+            message=message.strip()
+        )
+    
+    # ==========================================
+    # GENERAL HANDLER
+    # ==========================================
+    
+    def handle_general_chat(self, user_input: str) -> AgentResponse:
+        """Handle general conversation"""
+        prompt = f"""
+        User says: "{user_input}"
+        
+        Respond as a helpful scheduling assistant.
+        Be friendly, concise, and ask clarifying questions if needed.
+        """
+        
+        response = self.deepseek.generate(prompt)
+        
+        return AgentResponse(
+            intent=Intent.GENERAL_CHAT,
+            message=response
+        )
+    
+    # ==========================================
+    # UTILITY METHODS
+    # ==========================================
+    
+    def format_schedule(self, schedule: Schedule) -> str:
+        """Format schedule for display"""
+        if not schedule or not schedule.tasks:
+            return "No tasks scheduled."
+        
+        lines = []
+        now = datetime.now().strftime('%H:%M')
+        
+        for task in schedule.tasks:
+            status_icon = {
+                'pending': 'âšª',
+                'in_progress': 'ðŸ”´',
+                'completed': 'âœ…',
+                'skipped': 'âŒ',
+                'postponed': 'â°'
+            }.get(task.status, 'âšª')
+            
+            # Check if task is now
+            is_now = task.start_time <= now <= task.end_time
+            if is_now and task.status == 'pending':
+                status_icon = 'ðŸ”´'
+                task.status = 'in_progress'
+            
+            lines.append(f"{status_icon} {task.start_time}-{task.end_time} {task.name}")
+            
+            if is_now and task.status == 'in_progress':
+                lines[-1] = f"ðŸ”´ NOW: {task.start_time}-{task.end_time} {task.name}"
+        
+        return "\n".join(lines)
+    
+    def progress_bar(self, progress: float, width: int = 20) -> str:
+        """Create ASCII progress bar"""
+        filled = int(width * progress / 100)
+        bar = 'â–ˆ' * filled + 'â–‘' * (width - filled)
+        return f"[{bar}]"
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\core\scheduler.py
+==================================================
+# backend/app/core/scheduler.py
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+import json
+
+class TaskScheduler:
+    """Task scheduling and optimization engine"""
+    
+    def __init__(self):
+        self.tasks = []
+        self.schedule = {}
+    
+    def create_schedule(self, tasks: List[Dict]) -> Dict:
+        """Create optimized schedule from tasks"""
+        # Sort by priority
+        sorted_tasks = sorted(tasks, key=lambda x: x.get('priority', 3), reverse=True)
+        
+        # Schedule tasks
+        current_time = datetime.strptime('06:00', '%H:%M')
+        scheduled = []
+        
+        for task in sorted_tasks:
+            duration = task.get('duration', 60)
+            start_time = current_time.strftime('%H:%M')
+            end_time = (current_time + timedelta(minutes=duration)).strftime('%H:%M')
+            
+            scheduled.append({
+                'id': task.get('id', str(len(scheduled) + 1)),
+                'name': task.get('name', 'Task'),
+                'start_time': start_time,
+                'end_time': end_time,
+                'duration': duration,
+                'priority': task.get('priority', 3),
+                'status': 'pending',
+                'category': task.get('category', 'general')
+            })
+            
+            current_time += timedelta(minutes=duration + 5)  # 5 min buffer
+        
+        return {
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'tasks': scheduled,
+            'total_hours': len(scheduled) * 60 / 60,
+            'completion_rate': 0
+        }
+    
+    def optimize_schedule(self, current_schedule: Dict, constraints: Dict) -> Dict:
+        """Optimize schedule based on constraints"""
+        # Remove completed tasks
+        tasks = [t for t in current_schedule.get('tasks', []) if t.get('status') != 'completed']
+        
+        # Apply time constraints
+        # TODO: Implement optimization logic
+        
+        return current_schedule
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\core\__init__.py
+==================================================
+# Core package
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\models\database.py
+==================================================
+import sqlite3
+import json
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+from contextlib import contextmanager
+import os
+
+# ============================================
+# DATABASE MANAGER
+# ============================================
+
+class Database:
+    def __init__(self, db_path="focus_agent.db"):
+        self.db_path = db_path
+        self.init_db()
+    
+    @contextmanager
+    def get_connection(self):
+        """Context manager for database connections"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+    
+    def init_db(self):
+        """Initialize all tables"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # ==========================================
+            # USERS TABLE
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT UNIQUE NOT NULL,
+                    api_key TEXT,
+                    timezone TEXT DEFAULT 'UTC',
+                    wake_time TEXT DEFAULT '06:00',
+                    sleep_time TEXT DEFAULT '22:00',
+                    preferred_work_hours TEXT,  -- JSON array
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # ==========================================
+            # SCHEDULES TABLE
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,  -- YYYY-MM-DD
+                    schedule_data TEXT NOT NULL,  -- JSON
+                    version INTEGER DEFAULT 1,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # ==========================================
+            # GOALS TABLE
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS goals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    category TEXT,
+                    priority INTEGER DEFAULT 3,
+                    status TEXT DEFAULT 'active',
+                    target_date TEXT,  -- YYYY-MM-DD
+                    progress REAL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # ==========================================
+            # MILESTONES TABLE
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS milestones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    goal_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    "order" INTEGER DEFAULT 0,
+                    is_completed INTEGER DEFAULT 0,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # ==========================================
+            # HABITS TABLE
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS habits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    frequency TEXT DEFAULT 'daily',
+                    target_count INTEGER DEFAULT 1,
+                    current_streak INTEGER DEFAULT 0,
+                    longest_streak INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # ==========================================
+            # HABIT LOGS TABLE
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS habit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    habit_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,  -- YYYY-MM-DD
+                    completed INTEGER DEFAULT 1,
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (habit_id) REFERENCES habits(id) ON DELETE CASCADE,
+                    UNIQUE(habit_id, date)
+                )
+            """)
+            
+            # ==========================================
+            # TASK HISTORY TABLE (for agent learning)
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    task_name TEXT NOT NULL,
+                    scheduled_time TEXT,  -- HH:MM
+                    actual_time TEXT,  -- HH:MM (when actually done)
+                    status TEXT,  -- completed, skipped, postponed
+                    duration INTEGER,  -- minutes
+                    date TEXT NOT NULL,  -- YYYY-MM-DD
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # ==========================================
+            # ANALYTICS TABLE (cached stats)
+            # ==========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS analytics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,  -- YYYY-MM-DD
+                    stats TEXT NOT NULL,  -- JSON
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, date),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create indexes for performance
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_schedules_user_date ON schedules(user_id, date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_goals_user_status ON goals(user_id, status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_habits_user_status ON habits(user_id, status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_history_user_date ON task_history(user_id, date)")
+            
+            conn.commit()
+            print("âœ… Database initialized")
+
+    # ==========================================
+    # USER METHODS
+    # ==========================================
+    
+    def get_or_create_user(self, user_id: str) -> Dict:
+        """Get user or create if doesn't exist"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            user = cursor.fetchone()
+            
+            if user:
+                return dict(user)
+            
+            # Create new user
+            cursor.execute("""
+                INSERT INTO users (user_id, created_at, updated_at)
+                VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, (user_id,))
+            conn.commit()
+            
+            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            return dict(cursor.fetchone())
+    
+    def update_user(self, user_id: str, data: Dict):
+        """Update user settings"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build update query dynamically
+            fields = []
+            values = []
+            for key, value in data.items():
+                if key != 'id' and key != 'user_id':
+                    fields.append(f"{key} = ?")
+                    values.append(value)
+            
+            if not fields:
+                return
+            
+            values.append(user_id)
+            query = f"UPDATE users SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?"
+            cursor.execute(query, values)
+            conn.commit()
+    
+    def save_api_key(self, user_id: str, api_key: str):
+        """Save DeepSeek API key"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE users SET api_key = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            """, (api_key, user_id))
+            conn.commit()
+    
+    # ==========================================
+    # SCHEDULE METHODS
+    # ==========================================
+    
+    def save_schedule(self, user_id: int, date: str, schedule_data: Dict) -> int:
+        """Save or update schedule for a date"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if schedule exists
+            cursor.execute("""
+                SELECT id FROM schedules 
+                WHERE user_id = ? AND date = ? AND is_active = 1
+            """, (user_id, date))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update existing
+                cursor.execute("""
+                    UPDATE schedules 
+                    SET schedule_data = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (json.dumps(schedule_data), existing['id']))
+                conn.commit()
+                return existing['id']
+            else:
+                # Insert new
+                cursor.execute("""
+                    INSERT INTO schedules (user_id, date, schedule_data)
+                    VALUES (?, ?, ?)
+                """, (user_id, date, json.dumps(schedule_data)))
+                conn.commit()
+                return cursor.lastrowid
+    
+    def get_schedule(self, user_id: int, date: str) -> Optional[Dict]:
+        """Get schedule for a specific date"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM schedules 
+                WHERE user_id = ? AND date = ? AND is_active = 1
+                ORDER BY version DESC LIMIT 1
+            """, (user_id, date))
+            row = cursor.fetchone()
+            
+            if row:
+                result = dict(row)
+                result['schedule_data'] = json.loads(result['schedule_data'])
+                return result
+            return None
+    
+    def get_week_schedules(self, user_id: int, start_date: str) -> List[Dict]:
+        """Get all schedules for a week"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Calculate end date (7 days later)
+            cursor.execute("""
+                SELECT * FROM schedules 
+                WHERE user_id = ? AND date >= ? AND date < date(?, '+7 days')
+                AND is_active = 1
+                ORDER BY date ASC
+            """, (user_id, start_date, start_date))
+            
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                result = dict(row)
+                result['schedule_data'] = json.loads(result['schedule_data'])
+                results.append(result)
+            return results
+    
+    # ==========================================
+    # GOAL METHODS
+    # ==========================================
+    
+    def create_goal(self, user_id: int, data: Dict) -> int:
+        """Create a new goal"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO goals (
+                    user_id, title, description, category, priority, 
+                    status, target_date, progress
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                data.get('title'),
+                data.get('description'),
+                data.get('category'),
+                data.get('priority', 3),
+                data.get('status', 'active'),
+                data.get('target_date'),
+                data.get('progress', 0)
+            ))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_goals(self, user_id: int, status: str = None) -> List[Dict]:
+        """Get all goals for a user"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            query = "SELECT * FROM goals WHERE user_id = ?"
+            params = [user_id]
+            
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            
+            query += " ORDER BY priority DESC, created_at DESC"
+            
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+    
+    def update_goal_progress(self, goal_id: int, progress: float):
+        """Update goal progress"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE goals 
+                SET progress = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (progress, goal_id))
+            conn.commit()
+    
+    def complete_goal(self, goal_id: int):
+        """Mark goal as completed"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE goals 
+                SET status = 'completed', 
+                    progress = 100,
+                    completed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (goal_id,))
+            conn.commit()
+    
+    def add_milestone(self, goal_id: int, data: Dict) -> int:
+        """Add a milestone to a goal"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO milestones (goal_id, title, description, "order")
+                VALUES (?, ?, ?, ?)
+            """, (
+                goal_id,
+                data.get('title'),
+                data.get('description'),
+                data.get('order', 0)
+            ))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def complete_milestone(self, milestone_id: int):
+        """Mark milestone as completed"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE milestones 
+                SET is_completed = 1, completed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (milestone_id,))
+            conn.commit()
+    
+    # ==========================================
+    # HABIT METHODS
+    # ==========================================
+    
+    def create_habit(self, user_id: int, data: Dict) -> int:
+        """Create a new habit"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO habits (
+                    user_id, name, description, frequency, target_count
+                ) VALUES (?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                data.get('name'),
+                data.get('description'),
+                data.get('frequency', 'daily'),
+                data.get('target_count', 1)
+            ))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_habits(self, user_id: int, status: str = 'active') -> List[Dict]:
+        """Get habits for a user"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM habits 
+                WHERE user_id = ? AND status = ?
+                ORDER BY created_at DESC
+            """, (user_id, status))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+    
+    def log_habit(self, habit_id: int, date: str, completed: bool = True, notes: str = None):
+        """Log habit completion for a day"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if already logged
+            cursor.execute("""
+                SELECT id FROM habit_logs 
+                WHERE habit_id = ? AND date = ?
+            """, (habit_id, date))
+            existing = cursor.fetchone()
+            
+            if existing:
+                cursor.execute("""
+                    UPDATE habit_logs 
+                    SET completed = ?, notes = ?
+                    WHERE id = ?
+                """, (1 if completed else 0, notes, existing['id']))
+            else:
+                cursor.execute("""
+                    INSERT INTO habit_logs (habit_id, date, completed, notes)
+                    VALUES (?, ?, ?, ?)
+                """, (habit_id, date, 1 if completed else 0, notes))
+            
+            conn.commit()
+            
+            # Update streak
+            self._update_habit_streak(habit_id)
+    
+    def _update_habit_streak(self, habit_id: int):
+        """Update habit streak based on logs"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get habit
+            cursor.execute("SELECT * FROM habits WHERE id = ?", (habit_id,))
+            habit = cursor.fetchone()
+            if not habit:
+                return
+            
+            # Get last 30 days of logs
+            cursor.execute("""
+                SELECT date, completed FROM habit_logs 
+                WHERE habit_id = ? 
+                ORDER BY date DESC 
+                LIMIT 30
+            """, (habit_id,))
+            logs = cursor.fetchall()
+            
+            if not logs:
+                return
+            
+            # Calculate streak
+            streak = 0
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            for log in logs:
+                if log['completed']:
+                    streak += 1
+                else:
+                    break
+            
+            # Update streak
+            cursor.execute("""
+                UPDATE habits 
+                SET current_streak = ?,
+                    longest_streak = MAX(longest_streak, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (streak, streak, habit_id))
+            conn.commit()
+    
+    # ==========================================
+    # TASK HISTORY METHODS (for agent learning)
+    # ==========================================
+    
+    def log_task(self, user_id: int, data: Dict):
+        """Log task completion/skip/postpone for learning"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO task_history (
+                    user_id, task_name, scheduled_time, actual_time,
+                    status, duration, date, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                data.get('task_name'),
+                data.get('scheduled_time'),
+                data.get('actual_time'),
+                data.get('status'),  # completed, skipped, postponed
+                data.get('duration'),
+                data.get('date'),
+                data.get('notes')
+            ))
+            conn.commit()
+    
+    def get_task_patterns(self, user_id: int, days: int = 30) -> Dict:
+        """Get task patterns for learning"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get tasks in date range
+            cursor.execute("""
+                SELECT * FROM task_history 
+                WHERE user_id = ? 
+                AND date >= date('now', ?)
+                ORDER BY date DESC, created_at DESC
+            """, (user_id, f'-{days} days'))
+            
+            rows = cursor.fetchall()
+            tasks = [dict(row) for row in rows]
+            
+            # Analyze patterns
+            patterns = {
+                'skipped_tasks': [],
+                'postponed_tasks': [],
+                'missed_tasks': [],
+                'completion_rate': 0,
+                'total_tasks': len(tasks)
+            }
+            
+            if tasks:
+                completed = sum(1 for t in tasks if t['status'] == 'completed')
+                patterns['completion_rate'] = (completed / len(tasks)) * 100
+                
+                # Find patterns
+                skipped = {}
+                postponed = {}
+                
+                for task in tasks:
+                    if task['status'] == 'skipped':
+                        skipped[task['task_name']] = skipped.get(task['task_name'], 0) + 1
+                    elif task['status'] == 'postponed':
+                        postponed[task['task_name']] = postponed.get(task['task_name'], 0) + 1
+                
+                # Sort by frequency
+                patterns['skipped_tasks'] = sorted(skipped.items(), key=lambda x: x[1], reverse=True)[:5]
+                patterns['postponed_tasks'] = sorted(postponed.items(), key=lambda x: x[1], reverse=True)[:5]
+            
+            return patterns
+    
+    # ==========================================
+    # ANALYTICS METHODS
+    # ==========================================
+    
+    def save_analytics(self, user_id: int, date: str, stats: Dict):
+        """Cache daily analytics"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO analytics (user_id, date, stats)
+                VALUES (?, ?, ?)
+            """, (user_id, date, json.dumps(stats)))
+            conn.commit()
+    
+    def get_analytics(self, user_id: int, date: str) -> Optional[Dict]:
+        """Get cached analytics"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM analytics 
+                WHERE user_id = ? AND date = ?
+            """, (user_id, date))
+            row = cursor.fetchone()
+            
+            if row:
+                result = dict(row)
+                result['stats'] = json.loads(result['stats'])
+                return result
+            return None
+    
+    def get_weekly_analytics(self, user_id: int, start_date: str) -> List[Dict]:
+        """Get weekly analytics"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT * FROM analytics 
+                WHERE user_id = ? 
+                AND date >= ? 
+                AND date < date(?, '+7 days')
+                ORDER BY date ASC
+            """, (user_id, start_date, start_date))
+            
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                result = dict(row)
+                result['stats'] = json.loads(result['stats'])
+                results.append(result)
+            return results
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\models\schemas.py
+==================================================
+# backend/app/models/schemas.py
+from pydantic import BaseModel
+from typing import Optional, List, Dict
+from datetime import datetime
+
+class Task(BaseModel):
+    id: str
+    name: str
+    start_time: str
+    end_time: str
+    duration: int
+    priority: int
+    status: str = "pending"
+    category: str = "general"
+    notes: Optional[str] = None
+
+class Schedule(BaseModel):
+    date: str
+    tasks: List[Task]
+    total_hours: float = 0
+    completion_rate: float = 0
+
+class Goal(BaseModel):
+    id: Optional[int] = None
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    priority: int = 3
+    status: str = "active"
+    target_date: Optional[str] = None
+    progress: float = 0
+
+class Habit(BaseModel):
+    id: Optional[int] = None
+    name: str
+    description: Optional[str] = None
+    frequency: str = "daily"
+    target_count: int = 1
+    current_streak: int = 0
+
+class AgentRequest(BaseModel):
+    user_id: str
+    message: str
+    context: Optional[Dict] = None
+
+class AgentResponse(BaseModel):
+    intent: str
+    message: str
+    schedule: Optional[Schedule] = None
+    suggestions: List[str] = []
+    reasoning: str = ""
+    changed_tasks: List[str] = []
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\models\__init__.py
+==================================================
+# Models package
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\services\deepseek.py
+==================================================
+import os
+import json
+from typing import Optional, Dict, Any
+import httpx
+
+class DeepSeekService:
+    """DeepSeek API service for agent intelligence"""
+    
+    def __init__(self):
+        self.api_key = os.getenv('DEEPSEEK_API_KEY', '')
+        self.base_url = "https://api.deepseek.com/v1"
+        self.model = "deepseek-chat"
+        self.enabled = bool(self.api_key)
+    
+    def generate(self, prompt: str, max_tokens: int = 1000) -> str:
+        """Generate response from DeepSeek"""
+        if not self.enabled:
+            return self._mock_response(prompt)
+        
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful scheduling assistant."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.7
+                    }
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    return data['choices'][0]['message']['content']
+                else:
+                    print(f"DeepSeek API error: {response.status_code}")
+                    return self._mock_response(prompt)
+                    
+        except Exception as e:
+            print(f"DeepSeek error: {e}")
+            return self._mock_response(prompt)
+    
+    def _mock_response(self, prompt: str) -> str:
+        """Mock response when API is not available"""
+        return "I understand you're asking about scheduling. I'll help you plan your day. Can you tell me more about what you need?"
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\services\__init__.py
+==================================================
+# Services package
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\app\__init__.py
+==================================================
+# App package
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\.env.example
+==================================================
+DEEPSEEK_API_KEY=your-api-key-here
+REDIS_URL=redis://localhost:6379
+ENVIRONMENT=development
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\inspect.py
+==================================================
+import sqlite3
+import json
+
+conn = sqlite3.connect('focus_agent.db')
+cursor = conn.cursor()
+
+print("=" * 60)
+print("DATABASE INSPECTION")
+print("=" * 60)
+
+# Check users
+cursor.execute("SELECT * FROM users")
+users = cursor.fetchall()
+print(f"\nUsers: {len(users)}")
+for user in users:
+    print(f"  ID: {user[0]}, User: {user[1]}, API Key: {user[2] or 'Not set'}")
+
+# Check schedules
+cursor.execute("SELECT user_id, date, schedule_data FROM schedules")
+schedules = cursor.fetchall()
+print(f"\nSchedules: {len(schedules)}")
+for sched in schedules:
+    print(f"  User: {sched[0]}, Date: {sched[1]}")
+    try:
+        data = json.loads(sched[2])
+        if data and "tasks" in data:
+            print(f"    Tasks: {len(data['tasks'])}")
+            for task in data["tasks"][:3]:
+                print(f"      - {task.get('start_time', '')} {task.get('name', '')}")
+    except:
+        pass
+
+# Check goals
+cursor.execute("SELECT title, progress, status FROM goals")
+goals = cursor.fetchall()
+print(f"\nGoals: {len(goals)}")
+for goal in goals:
+    print(f"  {goal[0]}: {goal[1]}% ({goal[2]})")
+
+# Check habits
+cursor.execute("SELECT name, current_streak FROM habits")
+habits = cursor.fetchall()
+print(f"\nHabits: {len(habits)}")
+for habit in habits:
+    print(f"  {habit[0]}: {habit[1]} day streak")
+
+conn.close()
+print("\n" + "=" * 60)
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\main.py
+==================================================
+import os
+import sys
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+# Add the current directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Now import from app
+from app.api.routes import router
+from app.models.database import Database
+from app.services.deepseek import DeepSeekService
+
+load_dotenv()
+
+# Initialize database
+db = Database()
+deepseek = DeepSeekService()
+
+app = FastAPI(
+    title="Focus Agent API",
+    description="AI-powered adaptive scheduling agent",
+    version="0.1.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(router, prefix="/api")
+
+@app.get("/")
+async def root():
+    return {
+        "message": "🎯 Focus Agent API",
+        "status": "running",
+        "version": "0.1.0"
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "timestamp": "2026-07-28"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",  # Changed from "app.main:app" to "main:app"
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend\__init__.py
+==================================================
+# Backend package
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\css\style.css
+==================================================
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --bg-primary: #0a0a0f;
+    --bg-secondary: #12121a;
+    --bg-card: #1a1a2a;
+    --bg-input: #0a0a15;
+    --border-color: #2a2a3a;
+    --text-primary: #e8e8f0;
+    --text-secondary: #8888aa;
+    --text-muted: #555577;
+    --accent-blue: #667eea;
+    --accent-purple: #764ba2;
+    --accent-green: #55dd88;
+    --accent-red: #ff6677;
+    --accent-orange: #ffaa44;
+    --gradient-main: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    --radius: 16px;
+    --radius-sm: 10px;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    padding: 12px;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+}
+
+#app {
+    max-width: 600px;
+    width: 100%;
+    background: var(--bg-secondary);
+    border-radius: 24px;
+    padding: 20px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+    min-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* HEADER */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.logo { font-size: 24px; }
+.header h1 { font-size: 20px; font-weight: 700; background: var(--gradient-main); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.badge { font-size: 10px; background: var(--accent-green); color: var(--bg-primary); padding: 2px 10px; border-radius: 20px; font-weight: 700; }
+
+.header-actions { display: flex; gap: 8px; }
+.header-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+.header-btn:hover { background: var(--border-color); color: var(--text-primary); }
+
+/* STATUS */
+.status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    background: var(--bg-card);
+    border-radius: var(--radius-sm);
+    margin-bottom: 12px;
+    flex-shrink: 0;
+    border: 1px solid var(--border-color);
+}
+.status-indicator { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.online { background: var(--accent-green); }
+.status-dot.offline { background: var(--accent-red); }
+.status-dot.processing { background: var(--accent-orange); animation: pulse 1s infinite; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+.task-count { font-size: 13px; color: var(--text-muted); }
+.task-count span { color: var(--text-primary); font-weight: 600; }
+
+/* API KEY */
+.api-section {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+.api-row { display: flex; gap: 10px; }
+.api-row input {
+    flex: 1;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px 14px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: monospace;
+}
+.api-row input:focus { outline: none; border-color: var(--accent-blue); }
+.api-row button {
+    background: var(--gradient-main);
+    border: none;
+    color: white;
+    padding: 8px 18px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+}
+.api-status { margin-top: 6px; font-size: 12px; color: var(--text-muted); }
+.api-status.ready { color: var(--accent-green); }
+.api-status.error { color: var(--accent-red); }
+
+/* CHAT */
+.chat-area { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0 12px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 200px;
+    max-height: 400px;
+}
+.messages::-webkit-scrollbar { width: 4px; }
+.messages::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 10px; }
+
+.message {
+    display: flex;
+    gap: 10px;
+    animation: slideIn 0.3s ease;
+}
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.message.user { justify-content: flex-end; }
+.message.agent { justify-content: flex-start; }
+
+.message .avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+}
+.message.user .avatar { background: var(--gradient-main); }
+.message.agent .avatar { background: var(--bg-card); border: 1px solid var(--border-color); }
+
+.message .bubble {
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+.message.user .bubble { background: var(--gradient-main); color: white; border-bottom-right-radius: 4px; }
+.message.agent .bubble { background: var(--bg-card); border: 1px solid var(--border-color); border-bottom-left-radius: 4px; color: var(--text-primary); }
+
+.message .bubble .time { font-size: 10px; color: var(--text-muted); margin-top: 4px; display: block; }
+.message.user .bubble .time { color: rgba(255,255,255,0.6); }
+
+/* SCHEDULE IN MESSAGE */
+.schedule-block {
+    margin-top: 8px;
+    background: var(--bg-input);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    border: 1px solid var(--border-color);
+}
+.schedule-block .sch-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    font-size: 13px;
+}
+.schedule-block .sch-time { font-family: monospace; color: var(--text-secondary); min-width: 70px; font-size: 12px; }
+.schedule-block .sch-task { flex: 1; }
+
+/* INPUT */
+.input-bar {
+    display: flex;
+    gap: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+.input-bar textarea {
+    flex: 1;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px 14px;
+    color: var(--text-primary);
+    font-size: 14px;
+    resize: none;
+    min-height: 40px;
+    max-height: 100px;
+    font-family: inherit;
+    line-height: 1.4;
+}
+.input-bar textarea:focus { outline: none; border-color: var(--accent-blue); }
+.input-bar textarea::placeholder { color: var(--text-muted); }
+
+.input-bar .send-btn {
+    background: var(--gradient-main);
+    border: none;
+    color: white;
+    padding: 0 18px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 18px;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.input-bar .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.input-bar .spinner { display: none; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.8s linear infinite; }
+.input-bar .send-btn.loading .spinner { display: block; }
+.input-bar .send-btn.loading .send-icon { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* QUICK ACTIONS */
+.quick-actions {
+    display: flex;
+    gap: 6px;
+    padding: 6px 0;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+.quick-action {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+.quick-action:hover { background: var(--border-color); color: var(--text-primary); }
+.quick-action.emergency { border-color: var(--accent-red); color: var(--accent-red); }
+.quick-action.emergency:hover { background: var(--accent-red); color: white; }
+
+/* EMPTY STATE */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 30px 20px;
+    color: var(--text-muted);
+    flex: 1;
+}
+.empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+.empty-state h3 { color: var(--text-secondary); margin-bottom: 6px; font-size: 16px; }
+.empty-state p { font-size: 14px; max-width: 280px; line-height: 1.5; }
+
+/* RESPONSIVE */
+@media (max-width: 480px) {
+    #app { padding: 14px; border-radius: 16px; }
+    .header h1 { font-size: 17px; }
+    .api-row { flex-direction: column; }
+    .api-row button { width: 100%; }
+    .message .bubble { max-width: 92%; font-size: 13px; }
+    .quick-action { font-size: 10px; padding: 2px 8px; }
+}
+
+.hidden { display: none !important; }
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\js\agent.js
+==================================================
+// frontend/js/agent.js
+class FocusAgent {
+    constructor() {
+        this.apiBase = 'http://localhost:8000/api';
+        this.userId = localStorage.getItem('focus_user_id') || 'default_user';
+    }
+
+    async processMessage(message) {
+        try {
+            const response = await fetch(`${this.apiBase}/agent/process`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    user_id: this.userId,
+                    message: message
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            return data.response;
+        } catch (error) {
+            console.error('Agent error:', error);
+            throw error;
+        }
+    }
+
+    async getSchedule(date) {
+        const response = await fetch(`${this.apiBase}/schedule/${this.userId}?date=${date}`);
+        return response.json();
+    }
+
+    async getGoals(status) {
+        const url = status ? `${this.apiBase}/goals/${this.userId}?status=${status}` : `${this.apiBase}/goals/${this.userId}`;
+        const response = await fetch(url);
+        return response.json();
+    }
+
+    async getHabits(status = 'active') {
+        const response = await fetch(`${this.apiBase}/habits/${this.userId}?status=${status}`);
+        return response.json();
+    }
+
+    async logHabit(habitId, date, completed = true) {
+        const response = await fetch(`${this.apiBase}/habit/${habitId}/log?date=${date}&completed=${completed}`, {
+            method: 'POST'
+        });
+        return response.json();
+    }
+
+    async saveApiKey(apiKey) {
+        const response = await fetch(`${this.apiBase}/user/apikey`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                user_id: this.userId,
+                api_key: apiKey
+            })
+        });
+        return response.json();
+    }
+
+    async getProgress() {
+        const response = await fetch(`${this.apiBase}/progress/${this.userId}`);
+        return response.json();
+    }
+}
+
+// Export for use in app.js
+window.FocusAgent = FocusAgent;
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\js\app.js
+==================================================
+// ==========================================
+// STATE
+// ==========================================
+const state = {
+    apiKey: localStorage.getItem('focus_api_key') || '',
+    messages: JSON.parse(localStorage.getItem('focus_messages') || '[]'),
+    schedule: JSON.parse(localStorage.getItem('focus_schedule') || 'null'),
+    isProcessing: false,
+    taskCount: 0,
+    userId: 'device_' + (localStorage.getItem('focus_user_id') || Math.random().toString(36).substr(2, 9))
+};
+
+localStorage.setItem('focus_user_id', state.userId);
+
+// ==========================================
+// DOM REFS
+// ==========================================
+const $ = id => document.getElementById(id);
+const els = {
+    messages: $('messages'),
+    emptyState: $('emptyState'),
+    userInput: $('userInput'),
+    sendBtn: $('sendBtn'),
+    apiKeyInput: $('apiKeyInput'),
+    saveApiBtn: $('saveApiBtn'),
+    apiStatus: $('apiStatus'),
+    apiSection: $('apiSection'),
+    statusDot: $('statusDot'),
+    statusText: $('statusText'),
+    taskCount: $('taskCount'),
+    clearBtn: $('clearBtn'),
+    installBtn: $('installBtn')
+};
+
+const API_BASE = 'http://localhost:8000/api';
+
+// ==========================================
+// INIT
+// ==========================================
+function init() {
+    if (state.apiKey) {
+        els.apiKeyInput.value = state.apiKey;
+        els.apiSection.classList.add('has-key');
+        els.apiStatus.textContent = 'âœ… API key loaded';
+        els.apiStatus.className = 'api-status ready';
+    }
+    
+    if (state.messages.length > 0) {
+        els.emptyState.classList.add('hidden');
+        state.messages.forEach(msg => renderMessage(msg, false));
+    }
+    
+    updateTaskCount();
+    setupEventListeners();
+    setupAutoResize();
+    
+    console.log('ðŸŽ¯ Focus Agent initialized');
+    console.log('User ID:', state.userId);
+}
+
+// ==========================================
+// EVENT LISTENERS
+// ==========================================
+function setupEventListeners() {
+    els.sendBtn.addEventListener('click', handleSend);
+    els.userInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
+    });
+    
+    els.saveApiBtn.addEventListener('click', saveApiKey);
+    els.apiKeyInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') saveApiKey();
+    });
+    
+    document.querySelectorAll('.quick-action').forEach(btn => {
+        btn.addEventListener('click', () => {
+            els.userInput.value = btn.dataset.text;
+            els.userInput.focus();
+            handleSend();
+        });
+    });
+    
+    els.clearBtn.addEventListener('click', clearChat);
+    els.installBtn.addEventListener('click', installPWA);
+}
+
+// ==========================================
+// SEND MESSAGE
+// ==========================================
+async function handleSend() {
+    const text = els.userInput.value.trim();
+    if (!text || state.isProcessing) return;
+    
+    if (!state.apiKey) {
+        els.apiStatus.textContent = 'âš ï¸ Please enter your DeepSeek API key';
+        els.apiStatus.className = 'api-status error';
+        els.apiKeyInput.focus();
+        return;
+    }
+    
+    els.userInput.value = '';
+    els.userInput.style.height = 'auto';
+    els.emptyState.classList.add('hidden');
+    
+    addMessage('user', text);
+    
+    state.isProcessing = true;
+    els.sendBtn.disabled = true;
+    els.sendBtn.classList.add('loading');
+    setStatus('processing', 'Thinking...');
+    
+    try {
+        const response = await callAgent(text);
+        addMessage('agent', response.message);
+        
+        if (response.schedule) {
+            state.schedule = response.schedule;
+            localStorage.setItem('focus_schedule', JSON.stringify(response.schedule));
+            updateTaskCount();
+        }
+        
+        if (response.suggestions && response.suggestions.length > 0) {
+            addMessage('agent', 'ðŸ’¡ ' + response.suggestions.join('\n'));
+        }
+        
+    } catch (error) {
+        console.error('Error:', error);
+        addMessage('agent', 'âŒ Sorry, I encountered an error. Please try again.');
+    } finally {
+        state.isProcessing = false;
+        els.sendBtn.disabled = false;
+        els.sendBtn.classList.remove('loading');
+        setStatus('online', 'Ready');
+    }
+}
+
+// ==========================================
+// API CALL
+// ==========================================
+async function callAgent(message) {
+    const response = await fetch(`${API_BASE}/agent/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: message,
+            user_id: state.userId
+        })
+    });
+    
+    if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    return data.response;
+}
+
+// ==========================================
+// RENDER MESSAGE
+// ==========================================
+function addMessage(type, content) {
+    const msg = { type, content, timestamp: new Date().toISOString() };
+    state.messages.push(msg);
+    localStorage.setItem('focus_messages', JSON.stringify(state.messages));
+    renderMessage(msg, true);
+}
+
+function renderMessage(msg, animate = true) {
+    const div = document.createElement('div');
+    div.className = `message ${msg.type}`;
+    if (!animate) div.style.animation = 'none';
+    
+    const avatar = msg.type === 'user' ? 'ðŸ‘¤' : 'ðŸ¤–';
+    
+    div.innerHTML = `
+        <div class="avatar">${avatar}</div>
+        <div class="bubble">
+            ${formatContent(msg.content)}
+            <span class="time">${formatTime(msg.timestamp)}</span>
+        </div>
+    `;
+    
+    els.messages.appendChild(div);
+    els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+function formatContent(content) {
+    return content.replace(/\n/g, '<br>');
+}
+
+function formatTime(iso) {
+    const date = new Date(iso);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ==========================================
+// UI UPDATES
+// ==========================================
+function updateTaskCount() {
+    if (state.schedule && state.schedule.tasks) {
+        state.taskCount = state.schedule.tasks.length;
+    } else {
+        state.taskCount = 0;
+    }
+    els.taskCount.textContent = state.taskCount;
+}
+
+function setStatus(status, text) {
+    els.statusDot.className = `status-dot ${status}`;
+    els.statusText.textContent = text;
+}
+
+function saveApiKey() {
+    const key = els.apiKeyInput.value.trim();
+    if (!key) {
+        els.apiStatus.textContent = 'âš ï¸ Please enter a valid API key';
+        els.apiStatus.className = 'api-status error';
+        return;
+    }
+    
+    state.apiKey = key;
+    localStorage.setItem('focus_api_key', key);
+    els.apiSection.classList.add('has-key');
+    els.apiStatus.textContent = 'âœ… API key saved!';
+    els.apiStatus.className = 'api-status ready';
+}
+
+function clearChat() {
+    if (confirm('Clear all messages?')) {
+        state.messages = [];
+        localStorage.setItem('focus_messages', JSON.stringify([]));
+        els.messages.querySelectorAll('.message').forEach(el => el.remove());
+        els.emptyState.classList.remove('hidden');
+        updateTaskCount();
+    }
+}
+
+function setupAutoResize() {
+    els.userInput.addEventListener('input', () => {
+        els.userInput.style.height = 'auto';
+        els.userInput.style.height = Math.min(els.userInput.scrollHeight, 100) + 'px';
+    });
+}
+
+// ==========================================
+// PWA INSTALL
+// ==========================================
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    els.installBtn.style.display = 'block';
+});
+
+async function installPWA() {
+    if (deferredPrompt) {
+        deferredPrompt.prompt();
+        const result = await deferredPrompt.userChoice;
+        if (result.outcome === 'accepted') {
+            console.log('âœ… App installed');
+        }
+        deferredPrompt = null;
+        els.installBtn.style.display = 'none';
+    } else {
+        alert('ðŸ“± To install:\nâ€¢ Chrome: Menu â†’ "Add to Home Screen"\nâ€¢ Safari: Share â†’ "Add to Home Screen"');
+    }
+}
+
+// ==========================================
+// START
+// ==========================================
+document.addEventListener('DOMContentLoaded', init);
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\index.html
+==================================================
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0a0a0f" />
+    
+    <!-- PWA -->
+    <link rel="manifest" href="manifest.json" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    
+    <title>ðŸŽ¯ Focus Agent</title>
+    
+    <style>
+        /* ============================================
+           RESET & BASE
+           ============================================ */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a2a;
+            --bg-input: #0a0a15;
+            --border-color: #2a2a3a;
+            --text-primary: #e8e8f0;
+            --text-secondary: #8888aa;
+            --text-muted: #555577;
+            --accent-purple: #764ba2;
+            --accent-blue: #667eea;
+            --accent-green: #55dd88;
+            --accent-red: #ff6677;
+            --accent-orange: #ffaa44;
+            --gradient-main: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+            --radius: 16px;
+            --radius-sm: 10px;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 12px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+        }
+        
+        /* ============================================
+           APP CONTAINER
+           ============================================ */
+        .app {
+            max-width: 600px;
+            width: 100%;
+            background: var(--bg-secondary);
+            border-radius: 24px;
+            padding: 20px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow);
+            min-height: 90vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* ============================================
+           HEADER
+           ============================================ */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-shrink: 0;
+        }
+        
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .header .logo {
+            font-size: 28px;
+        }
+        
+        .header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .header .badge {
+            font-size: 10px;
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            -webkit-text-fill-color: var(--bg-primary);
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .header-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 8px 14px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .header-btn:hover {
+            background: var(--border-color);
+            color: var(--text-primary);
+        }
+        
+        .header-btn.active {
+            background: var(--gradient-main);
+            color: white;
+            border-color: transparent;
+        }
+        
+        /* ============================================
+           STATUS BAR
+           ============================================ */
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            background: var(--bg-card);
+            border-radius: var(--radius-sm);
+            margin-bottom: 16px;
+            flex-shrink: 0;
+            border: 1px solid var(--border-color);
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-dot.online {
+            background: var(--accent-green);
+        }
+        
+        .status-dot.offline {
+            background: var(--accent-red);
+        }
+        
+        .status-dot.processing {
+            background: var(--accent-orange);
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.8); }
+        }
+        
+        .task-count {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        
+        .task-count span {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        /* ============================================
+           API KEY SECTION
+           ============================================ */
+        .api-section {
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 16px;
+            border: 1px solid var(--border-color);
+            flex-shrink: 0;
+            transition: all 0.3s;
+        }
+        
+        .api-section.has-key {
+            border-color: var(--accent-green);
+        }
+        
+        .api-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .api-row input {
+            flex: 1;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: monospace;
+            transition: border-color 0.2s;
+        }
+        
+        .api-row input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .api-row input::placeholder {
+            color: var(--text-muted);
+        }
+        
+        .api-row button {
+            background: var(--gradient-main);
+            border: none;
+            color: white;
+            padding: 10px 18px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        
+        .api-row button:hover {
+            transform: scale(1.02);
+            opacity: 0.9;
+        }
+        
+        .api-status {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        
+        .api-status.ready {
+            color: var(--accent-green);
+        }
+        
+        .api-status.error {
+            color: var(--accent-red);
+        }
+        
+        /* ============================================
+           CHAT / INPUT AREA
+           ============================================ */
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        
+        /* Messages */
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0 16px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 200px;
+            max-height: 400px;
+        }
+        
+        .messages::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .messages::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        
+        .messages::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 10px;
+        }
+        
+        /* Message Bubbles */
+        .message {
+            display: flex;
+            gap: 10px;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            justify-content: flex-end;
+        }
+        
+        .message.agent {
+            justify-content: flex-start;
+        }
+        
+        .message .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+        
+        .message.user .avatar {
+            background: var(--gradient-main);
+        }
+        
+        .message.agent .avatar {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+        }
+        
+        .message .bubble {
+            max-width: 85%;
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            font-size: 14px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+        
+        .message.user .bubble {
+            background: var(--gradient-main);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+        
+        .message.agent .bubble {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 4px;
+            color: var(--text-primary);
+        }
+        
+        .message .bubble .time {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            display: block;
+        }
+        
+        .message.user .bubble .time {
+            color: rgba(255, 255, 255, 0.6);
+        }
+        
+        /* Schedule in message */
+        .schedule-block {
+            margin-top: 10px;
+            background: var(--bg-input);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .schedule-block .sch-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        
+        .schedule-block .sch-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+        
+        .schedule-block .sch-item:hover {
+            background: var(--bg-card);
+        }
+        
+        .schedule-block .sch-time {
+            font-family: monospace;
+            color: var(--text-secondary);
+            min-width: 80px;
+            font-size: 12px;
+        }
+        
+        .schedule-block .sch-task {
+            flex: 1;
+        }
+        
+        .schedule-block .sch-status {
+            font-size: 14px;
+        }
+        
+        /* ============================================
+           INPUT BAR
+           ============================================ */
+        .input-bar {
+            display: flex;
+            gap: 10px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+        
+        .input-bar textarea {
+            flex: 1;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-size: 14px;
+            resize: none;
+            min-height: 48px;
+            max-height: 120px;
+            font-family: inherit;
+            transition: border-color 0.2s;
+            line-height: 1.4;
+        }
+        
+        .input-bar textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .input-bar textarea::placeholder {
+            color: var(--text-muted);
+        }
+        
+        .input-bar .send-btn {
+            background: var(--gradient-main);
+            border: none;
+            color: white;
+            padding: 0 20px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 20px;
+            transition: all 0.2s;
+            flex-shrink: 0;
+            min-height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .input-bar .send-btn:hover {
+            transform: scale(1.02);
+            opacity: 0.9;
+        }
+        
+        .input-bar .send-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .input-bar .send-btn.loading {
+            position: relative;
+        }
+        
+        .input-bar .send-btn.loading .spinner {
+            display: block;
+        }
+        
+        .input-bar .send-btn.loading .send-icon {
+            display: none;
+        }
+        
+        .input-bar .spinner {
+            display: none;
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Quick action chips */
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+            padding: 8px 0 4px 0;
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+        
+        .quick-action {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        
+        .quick-action:hover {
+            background: var(--border-color);
+            color: var(--text-primary);
+        }
+        
+        .quick-action.emergency {
+            border-color: var(--accent-red);
+            color: var(--accent-red);
+        }
+        
+        .quick-action.emergency:hover {
+            background: var(--accent-red);
+            color: white;
+        }
+        
+        /* ============================================
+           FOOTER
+           ============================================ */
+        .footer {
+            margin-top: 16px;
+            text-align: center;
+            font-size: 11px;
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+        
+        /* ============================================
+           RESPONSIVE
+           ============================================ */
+        @media (max-width: 480px) {
+            .app {
+                padding: 14px;
+                border-radius: 16px;
+            }
+            
+            .header h1 {
+                font-size: 17px;
+            }
+            
+            .header .badge {
+                font-size: 8px;
+                padding: 1px 8px;
+            }
+            
+            .api-row {
+                flex-direction: column;
+            }
+            
+            .api-row button {
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .message .bubble {
+                max-width: 92%;
+                font-size: 13px;
+            }
+            
+            .schedule-block .sch-item {
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+            
+            .schedule-block .sch-time {
+                min-width: 60px;
+                font-size: 11px;
+            }
+            
+            .quick-actions {
+                gap: 6px;
+            }
+            
+            .quick-action {
+                font-size: 11px;
+                padding: 3px 10px;
+            }
+        }
+        
+        /* ============================================
+           UTILITY
+           ============================================ */
+        .hidden {
+            display: none !important;
+        }
+        
+        .text-gradient {
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        /* ============================================
+           EMPTY STATE
+           ============================================ */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+            flex: 1;
+        }
+        
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+        
+        .empty-state h3 {
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+        
+        .empty-state p {
+            font-size: 14px;
+            max-width: 300px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="app" id="app">
+        
+        <!-- ==========================================
+        HEADER
+        ========================================== -->
+        <header class="header">
+            <div class="header-left">
+                <span class="logo">ðŸŽ¯</span>
+                <h1>Focus Agent</h1>
+                <span class="badge">v1</span>
+            </div>
+            <div class="header-actions">
+                <button class="header-btn" id="clearBtn" title="Clear chat">âœ•</button>
+                <button class="header-btn" id="installBtn">ðŸ“±</button>
+            </div>
+        </header>
+        
+        <!-- ==========================================
+        STATUS BAR
+        ========================================== -->
+        <div class="status-bar">
+            <div class="status-indicator">
+                <span class="status-dot online" id="statusDot"></span>
+                <span id="statusText">Ready</span>
+            </div>
+            <div class="task-count">
+                ðŸ“‹ <span id="taskCount">0</span> tasks
+            </div>
+        </div>
+        
+        <!-- ==========================================
+        API KEY
+        ========================================== -->
+        <div class="api-section" id="apiSection">
+            <div class="api-row">
+                <input type="password" id="apiKeyInput" placeholder="sk-... enter DeepSeek API key" />
+                <button id="saveApiBtn">Save Key</button>
+            </div>
+            <div class="api-status" id="apiStatus">ðŸ”‘ Enter your DeepSeek API key to start</div>
+        </div>
+        
+        <!-- ==========================================
+        CHAT AREA
+        ========================================== -->
+        <div class="chat-area">
+            <div class="messages" id="messages">
+                <!-- Empty State -->
+                <div class="empty-state" id="emptyState">
+                    <div class="icon">ðŸ§ </div>
+                    <h3>Your AI Scheduling Agent</h3>
+                    <p>Tell me your schedule, and I'll adapt when things change.<br />
+                    Try: <em>"I need to wake up at 6am, code from 7-9..."</em></p>
+                </div>
+            </div>
+            
+            <!-- Quick Actions -->
+            <div class="quick-actions">
+                <button class="quick-action" data-text="I woke up late, shift everything +30min">â° Woke up late</button>
+                <button class="quick-action emergency" data-text="URGENT: I have an emergency call at 10am">ðŸš¨ Emergency</button>
+                <button class="quick-action" data-text="I'm skipping my workout today">âŒ Skip workout</button>
+                <button class="quick-action" data-text="Show me my schedule">ðŸ“… Show schedule</button>
+            </div>
+            
+            <!-- Input Bar -->
+            <div class="input-bar">
+                <textarea id="userInput" rows="1" placeholder="Type your message..." 
+                    aria-label="Type your message"></textarea>
+                <button class="send-btn" id="sendBtn">
+                    <span class="send-icon">âž¤</span>
+                    <div class="spinner"></div>
+                </button>
+            </div>
+        </div>
+        
+        <!-- ==========================================
+        FOOTER
+        ========================================== -->
+        <div class="footer">
+            Works offline Â· No external apps Â· Adaptive AI Agent
+        </div>
+    </div>
+    
+    <!-- ==========================================
+    JAVASCRIPT
+    ========================================== -->
+    <script>
+        // ============================================
+        // STATE
+        // ============================================
+        const state = {
+            apiKey: localStorage.getItem('focus_api_key') || '',
+            messages: JSON.parse(localStorage.getItem('focus_messages') || '[]'),
+            schedule: JSON.parse(localStorage.getItem('focus_schedule') || 'null'),
+            isProcessing: false,
+            taskCount: 0
+        };
+        
+        // ============================================
+        // DOM REFS
+        // ============================================
+        const $ = (id) => document.getElementById(id);
+        const els = {
+            messages: $('messages'),
+            emptyState: $('emptyState'),
+            userInput: $('userInput'),
+            sendBtn: $('sendBtn'),
+            apiKeyInput: $('apiKeyInput'),
+            saveApiBtn: $('saveApiBtn'),
+            apiStatus: $('apiStatus'),
+            apiSection: $('apiSection'),
+            statusDot: $('statusDot'),
+            statusText: $('statusText'),
+            taskCount: $('taskCount'),
+            clearBtn: $('clearBtn'),
+            installBtn: $('installBtn')
+        };
+        
+        // ============================================
+        // INIT
+        // ============================================
+        function init() {
+            // Restore API key
+            if (state.apiKey) {
+                els.apiKeyInput.value = state.apiKey;
+                els.apiSection.classList.add('has-key');
+                els.apiStatus.textContent = 'âœ… API key loaded';
+                els.apiStatus.className = 'api-status ready';
+            }
+            
+            // Restore messages
+            if (state.messages.length > 0) {
+                els.emptyState.classList.add('hidden');
+                state.messages.forEach(msg => renderMessage(msg, false));
+            }
+            
+            // Restore task count
+            updateTaskCount();
+            
+            // Event listeners
+            setupEventListeners();
+            
+            // Auto-resize textarea
+            setupAutoResize();
+            
+            console.log('ðŸŽ¯ Focus Agent initialized');
+        }
+        
+        // ============================================
+        // EVENT LISTENERS
+        // ============================================
+        function setupEventListeners() {
+            // Send message
+            els.sendBtn.addEventListener('click', handleSend);
+            els.userInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                }
+            });
+            
+            // API key
+            els.saveApiBtn.addEventListener('click', saveApiKey);
+            els.apiKeyInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') saveApiKey();
+            });
+            
+            // Quick actions
+            document.querySelectorAll('.quick-action').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    els.userInput.value = btn.dataset.text;
+                    els.userInput.focus();
+                    handleSend();
+                });
+            });
+            
+            // Clear chat
+            els.clearBtn.addEventListener('click', clearChat);
+            
+            // Install PWA
+            els.installBtn.addEventListener('click', installPWA);
+        }
+        
+        // ============================================
+        // SEND MESSAGE
+        // ============================================
+        async function handleSend() {
+            const text = els.userInput.value.trim();
+            if (!text || state.isProcessing) return;
+            
+            // Check API key
+            if (!state.apiKey) {
+                els.apiStatus.textContent = 'âš ï¸ Please enter your DeepSeek API key first';
+                els.apiStatus.className = 'api-status error';
+                els.apiKeyInput.focus();
+                return;
+            }
+            
+            // Clear input
+            els.userInput.value = '';
+            els.userInput.style.height = 'auto';
+            
+            // Hide empty state
+            els.emptyState.classList.add('hidden');
+            
+            // Add user message
+            addMessage('user', text);
+            
+            // Set processing state
+            state.isProcessing = true;
+            els.sendBtn.disabled = true;
+            els.sendBtn.classList.add('loading');
+            setStatus('processing', 'Thinking...');
+            
+            try {
+                // TODO: Call API
+                // For now, simulate agent response
+                await simulateAgentResponse(text);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage('agent', 'âŒ Sorry, I encountered an error. Please try again.');
+            } finally {
+                state.isProcessing = false;
+                els.sendBtn.disabled = false;
+                els.sendBtn.classList.remove('loading');
+                setStatus('online', 'Ready');
+            }
+        }
+        
+        // ============================================
+        // SIMULATE AGENT (TODO: Replace with real API)
+        // ============================================
+        async function simulateAgentResponse(userText) {
+            // Show typing indicator
+            addMessage('agent', 'â³ Thinking...');
+            
+            // Simulate API delay
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            
+            // Remove typing message
+            const messages = els.messages.querySelectorAll('.message');
+            if (messages.length > 0 && messages[messages.length - 1].querySelector('.bubble')?.textContent === 'â³ Thinking...') {
+                messages[messages.length - 1].remove();
+            }
+            
+            // Generate response based on input
+            let response = '';
+            let schedule = null;
+            
+            const lower = userText.toLowerCase();
+            
+            if (lower.includes('wake') || lower.includes('morning') || lower.includes('schedule')) {
+                schedule = generateSampleSchedule();
+                response = `âœ… I've created your schedule for today!\n\n${formatSchedule(schedule)}\n\nðŸ’¡ I'll adjust automatically if anything changes. Just let me know!`;
+            } else if (lower.includes('late') || lower.includes('shift')) {
+                response = `â° No problem! I've shifted everything +30 minutes.\n\nYour new schedule:\n${formatSchedule(generateShiftedSchedule())}\n\nLet me know if you need any other adjustments.`;
+            } else if (lower.includes('emergency') || lower.includes('urgent')) {
+                response = `ðŸš¨ Emergency handled! I've inserted your urgent task and re-optimized the day.\n\n${formatSchedule(generateEmergencySchedule())}\n\nâš ï¸ Your 2pm focus block is protected.`;
+            } else if (lower.includes('skip') || lower.includes('workout')) {
+                response = `âŒ Skipped workout. I've redistributed that time to other tasks.\n\n${formatSchedule(generateSkippedSchedule())}\n\nðŸ’¡ Want me to move workouts to evenings going forward?`;
+            } else if (lower.includes('show') || lower.includes('schedule')) {
+                const currentSchedule = state.schedule || generateSampleSchedule();
+                response = `ðŸ“… Here's your current schedule:\n\n${formatSchedule(currentSchedule)}`;
+            } else {
+                response = `ðŸ¤” I understand you said: "${userText}"\n\nI can help you with:\nâ€¢ Creating a schedule\nâ€¢ Handling emergencies\nâ€¢ Skipping tasks\nâ€¢ Shifting time\n\nTry one of the quick actions above or tell me what you need!`;
+            }
+            
+            // Save schedule if generated
+            if (schedule) {
+                state.schedule = schedule;
+                localStorage.setItem('focus_schedule', JSON.stringify(schedule));
+                updateTaskCount();
+            }
+            
+            // Add agent response
+            addMessage('agent', response);
+        }
+        
+        // ============================================
+        // SCHEDULE GENERATORS (Mock data)
+        // ============================================
+        function generateSampleSchedule() {
+            return [
+                { time: '6:00 AM', task: 'ðŸŒ… Wake up & Morning routine', status: 'now' },
+                { time: '6:30 AM', task: 'ðŸ‹ï¸ Exercise', status: 'upcoming' },
+                { time: '7:30 AM', task: 'ðŸ’» Deep work: Coding', status: 'upcoming' },
+                { time: '9:30 AM', task: 'ðŸ“§ Email & Communication', status: 'upcoming' },
+                { time: '10:30 AM', task: 'ðŸ“ Job applications', status: 'upcoming' },
+                { time: '12:00 PM', task: 'ðŸ½ï¸ Lunch break', status: 'upcoming' },
+                { time: '1:00 PM', task: 'ðŸ”’ Focus block: Project work', status: 'upcoming' },
+                { time: '3:00 PM', task: 'ðŸ“ž Meetings & Calls', status: 'upcoming' },
+                { time: '5:00 PM', task: 'âœ… Wrap up & Plan tomorrow', status: 'upcoming' }
+            ];
+        }
+        
+        function generateShiftedSchedule() {
+            const sched = generateSampleSchedule();
+            return sched.map(item => {
+                const [time, ampm] = item.time.split(' ');
+                let [hour, min] = time.split(':').map(Number);
+                hour = (hour + 1) % 12 || 12;
+                return { ...item, time: `${hour}:${min} ${ampm}` };
+            });
+        }
+        
+        function generateEmergencySchedule() {
+            const sched = generateSampleSchedule();
+            return [
+                ...sched.slice(0, 4),
+                { time: '10:00 AM', task: 'ðŸš¨ URGENT: Client call', status: 'now' },
+                ...sched.slice(4).map((item, i) => {
+                    const [time, ampm] = item.time.split(' ');
+                    let [hour, min] = time.split(':').map(Number);
+                    hour = hour + (i < 2 ? 1 : 0);
+                    hour = hour % 12 || 12;
+                    return { ...item, time: `${hour}:${min} ${ampm}` };
+                })
+            ];
+        }
+        
+        function generateSkippedSchedule() {
+            const sched = generateSampleSchedule();
+            return sched.filter(item => !item.task.includes('Exercise'));
+        }
+        
+        function formatSchedule(schedule) {
+            if (!schedule || schedule.length === 0) return 'No tasks scheduled.';
+            return schedule.map(item => {
+                const status = item.status === 'now' ? 'ðŸ”´' : 'âšª';
+                return `${status} ${item.time} - ${item.task}`;
+            }).join('\n');
+        }
+        
+        // ============================================
+        // RENDER MESSAGE
+        // ============================================
+        function addMessage(type, content) {
+            const msg = { type, content, timestamp: new Date().toISOString() };
+            state.messages.push(msg);
+            localStorage.setItem('focus_messages', JSON.stringify(state.messages));
+            renderMessage(msg, true);
+        }
+        
+        function renderMessage(msg, animate = true) {
+            const div = document.createElement('div');
+            div.className = `message ${msg.type}`;
+            if (!animate) div.style.animation = 'none';
+            
+            const avatar = msg.type === 'user' ? 'ðŸ‘¤' : 'ðŸ¤–';
+            
+            // Check if content contains schedule
+            const hasSchedule = msg.content.includes('â€¢') && msg.content.includes('-');
+            
+            div.innerHTML = `
+                <div class="avatar">${avatar}</div>
+                <div class="bubble">
+                    ${formatContent(msg.content)}
+                    <span class="time">${formatTime(msg.timestamp)}</span>
+                </div>
+            `;
+            
+            els.messages.appendChild(div);
+            els.messages.scrollTop = els.messages.scrollHeight;
+        }
+        
+        function formatContent(content) {
+            // Convert newlines to <br>
+            let html = content.replace(/\n/g, '<br>');
+            
+            // Convert schedule format to structured display
+            if (content.includes('â€¢') && content.includes('-')) {
+                // Already formatted
+            }
+            
+            return html;
+        }
+        
+        function formatTime(iso) {
+            const date = new Date(iso);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        
+        // ============================================
+        // UPDATE UI
+        // ============================================
+        function updateTaskCount() {
+            if (state.schedule) {
+                state.taskCount = state.schedule.length;
+            } else {
+                state.taskCount = 0;
+            }
+            els.taskCount.textContent = state.taskCount;
+        }
+        
+        function setStatus(status, text) {
+            els.statusDot.className = `status-dot ${status}`;
+            els.statusText.textContent = text;
+        }
+        
+        // ============================================
+        // API KEY
+        // ============================================
+        function saveApiKey() {
+            const key = els.apiKeyInput.value.trim();
+            if (!key) {
+                els.apiStatus.textContent = 'âš ï¸ Please enter a valid API key';
+                els.apiStatus.className = 'api-status error';
+                return;
+            }
+            
+            state.apiKey = key;
+            localStorage.setItem('focus_api_key', key);
+            els.apiSection.classList.add('has-key');
+            els.apiStatus.textContent = 'âœ… API key saved!';
+            els.apiStatus.className = 'api-status ready';
+        }
+        
+        // ============================================
+        // CLEAR CHAT
+        // ============================================
+        function clearChat() {
+            if (confirm('Clear all messages?')) {
+                state.messages = [];
+                localStorage.setItem('focus_messages', JSON.stringify([]));
+                els.messages.querySelectorAll('.message').forEach(el => el.remove());
+                els.emptyState.classList.remove('hidden');
+                updateTaskCount();
+            }
+        }
+        
+        // ============================================
+        // AUTO-RESIZE TEXTAREA
+        // ============================================
+        function setupAutoResize() {
+            els.userInput.addEventListener('input', () => {
+                els.userInput.style.height = 'auto';
+                els.userInput.style.height = Math.min(els.userInput.scrollHeight, 120) + 'px';
+            });
+        }
+        
+        // ============================================
+        // PWA INSTALL
+        // ============================================
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            els.installBtn.style.display = 'block';
+        });
+        
+        async function installPWA() {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const result = await deferredPrompt.userChoice;
+                if (result.outcome === 'accepted') {
+                    console.log('âœ… App installed');
+                }
+                deferredPrompt = null;
+                els.installBtn.style.display = 'none';
+            } else {
+                // Fallback: show instructions
+                alert('ðŸ“± To install:\nâ€¢ Chrome: Menu â†’ "Add to Home Screen"\nâ€¢ Safari: Share â†’ "Add to Home Screen"');
+            }
+        }
+        
+        // ============================================
+        // START
+        // ============================================
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\manifest.json
+==================================================
+{
+    "name": "Focus Agent",
+    "short_name": "FocusAgent",
+    "description": "AI-powered adaptive scheduling agent",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0a0a0f",
+    "theme_color": "#0a0a0f",
+    "icons": [
+        {
+            "src": "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>ðŸŽ¯</text></svg>",
+            "sizes": "192x192",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ]
+}
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\README.md
+==================================================
+create a readme summaraising what weve done and what are the next steps
+ðŸŽ¯ Focus Agent - Complete Project Summary
+ðŸ“‹ Project Overview
+Focus Agent is an AI-powered adaptive scheduling assistant that lives on your phone. Unlike static schedulers, it dynamically adjusts to your life - handling skipped tasks, emergencies, and learning your patterns over time.
+
+The Core Philosophy
+"Users are already on their phones. Why make them leave the app?"
+
+We built a native PWA with an intelligent agent backend that:
+
+Creates schedules from natural language
+
+Adapts in real-time when plans change
+
+Tracks goals and habits with streaks
+
+Learns from user behavior to improve suggestions
+
+Works offline on any device
+
+ðŸ—ï¸ What We've Built
+Architecture
+text
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                    FOCUS AGENT SYSTEM                        â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                             â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”         â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                  â”‚
+â”‚  â”‚   PWA       â”‚  â—„â”€â”€â–º   â”‚  FastAPI    â”‚                  â”‚
+â”‚  â”‚  Frontend   â”‚   API   â”‚  Backend    â”‚                  â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜                  â”‚
+â”‚        â”‚                        â”‚                          â”‚
+â”‚        â”‚                        â–¼                          â”‚
+â”‚        â”‚              â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”             â”‚
+â”‚        â”‚              â”‚   SQLite Database   â”‚             â”‚
+â”‚        â”‚              â”‚  - Users            â”‚             â”‚
+â”‚        â”‚              â”‚  - Schedules        â”‚             â”‚
+â”‚        â”‚              â”‚  - Goals            â”‚             â”‚
+â”‚        â”‚              â”‚  - Habits           â”‚             â”‚
+â”‚        â”‚              â”‚  - Task History     â”‚             â”‚
+â”‚        â”‚              â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜             â”‚
+â”‚        â”‚                        â”‚                          â”‚
+â”‚        â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â”‚
+â”‚                                 â–¼                          â”‚
+â”‚                    â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                â”‚
+â”‚                    â”‚   DeepSeek AI       â”‚                â”‚
+â”‚                    â”‚   Agent Engine     â”‚                â”‚
+â”‚                    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜                â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+Backend Components
+Component	File	Purpose
+FastAPI Server	main.py	REST API endpoints, serves both API and static files
+Agent Engine	core/agent.py	Intent detection, dynamic scheduling, emergency handling
+Database	models/database.py	SQLite operations, user/schedule/goal/habit management
+AI Service	services/deepseek.py	DeepSeek API integration for natural language processing
+Frontend Components
+Component	File	Purpose
+Dashboard	index.html	Main UI with stats, schedule, goals, habits
+Styles	css/style.css	Dark theme, responsive design
+App Logic	js/app.js	API integration, data fetching, chat interface
+PWA	manifest.json, sw.js	Offline support, home screen installation
+Database Schema
+sql
+users          - User profiles, API keys, preferences
+schedules      - Daily schedules with task lists
+goals          - User goals with progress tracking
+milestones     - Goal milestones for progress
+habits         - Habits with current/longest streaks
+habit_logs     - Daily habit completion logs
+task_history   - Agent learning data (skipped/postponed tasks)
+analytics      - Cached analytics data
+ðŸš€ Current Status
+âœ… Working Features
+Backend Server running on port 8000
+
+Frontend Dashboard served on port 3000
+
+Database initialized with all tables
+
+API Endpoints ready:
+
+/api/agent/process - Chat with agent
+
+/api/schedule - Schedule CRUD
+
+/api/goals - Goal management
+
+/api/habits - Habit tracking
+
+/api/task/log - Task history logging
+
+/api/progress - Progress reports
+
+/api/analytics - Analytics data
+
+âš ï¸ Issues to Fix
+Frontend API integration - Dashboard not displaying data from backend
+
+Chat agent - Not fully responding to commands
+
+Data persistence - Need to test user-driven data creation
+
+CORS configuration - May need adjustment for production
+
+ðŸ“ Next Steps
+Phase 1: Fix Core Functionality (Today)
+â–¡ Debug API calls from frontend to backend
+â–¡ Fix CORS issues if any
+â–¡ Test agent responses with real commands
+â–¡ Verify data is saved to database from chat
+Phase 2: Enhance Agent Intelligence (Week 1)
+â–¡ Improve intent detection accuracy
+â–¡ Add context awareness (previous conversations)
+â–¡ Implement learning from task history patterns
+â–¡ Add proactive suggestions based on user behavior
+Phase 3: Feature Expansion (Week 2)
+â–¡ Emergency handling - Smart rescheduling
+â–¡ Task prioritization - Priority-based scheduling
+â–¡ Progress analytics - Charts and insights
+â–¡ Voice input - Speech-to-text for quick updates
+Phase 4: Production Readiness (Week 3)
+â–¡ Authentication - Secure user accounts
+â–¡ Cloud sync - Backup user data
+â–¡ Push notifications - Reminders and alerts
+â–¡ App store deployment - iOS/Android via PWA
+Phase 5: Advanced Features (Future)
+â–¡ Team scheduling - Collaborative planning
+â–¡ Calendar integration - Google Calendar, Outlook
+â–¡ Habit coaching - AI-powered habit formation
+â–¡ Focus timers - Pomodoro integration
+â–¡ Social accountability - Share goals with friends
+ðŸ”§ Quick Commands Reference
+Start the App
+powershell
+# Backend
+cd C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend
+python main.py
+
+# Frontend (new terminal)
+cd C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend
+python -m http.server 3000
+Test API
+powershell
+# Health check
+curl http://localhost:8000/health
+
+# Get schedule
+curl http://localhost:8000/api/schedule/demo_user
+
+# Chat with agent
+curl -X POST http://localhost:8000/api/agent/process \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Show my schedule","user_id":"demo_user"}'
+Database Commands
+powershell
+# Inspect database
+cd C:\Users\Administrator\Desktop\schedulerapp\focus-agent\backend
+python inspect.py
+
+# Open SQLite directly
+sqlite3 focus_agent.db
+.tables
+SELECT * FROM users;
+.quit
+ðŸ“ Project Structure
+text
+schedulerapp/
+â””â”€â”€ focus-agent/
+    â”œâ”€â”€ backend/
+    â”‚   â”œâ”€â”€ app/
+    â”‚   â”‚   â”œâ”€â”€ api/routes.py       # API endpoints
+    â”‚   â”‚   â”œâ”€â”€ core/agent.py       # Agent intelligence
+    â”‚   â”‚   â”œâ”€â”€ models/database.py  # SQLite operations
+    â”‚   â”‚   â””â”€â”€ services/deepseek.py # AI integration
+    â”‚   â”œâ”€â”€ main.py                 # FastAPI server
+    â”‚   â”œâ”€â”€ requirements.txt        # Python dependencies
+    â”‚   â””â”€â”€ focus_agent.db          # SQLite database
+    â”œâ”€â”€ frontend/
+    â”‚   â”œâ”€â”€ index.html              # Dashboard
+    â”‚   â”œâ”€â”€ css/style.css           # Styles
+    â”‚   â”œâ”€â”€ js/app.js              # Frontend logic
+    â”‚   â”œâ”€â”€ manifest.json          # PWA config
+    â”‚   â””â”€â”€ sw.js                  # Service worker
+    â”œâ”€â”€ run.ps1                     # Startup script
+    â””â”€â”€ README.md                   # This file
+ðŸ’¡ Key Learnings
+SQLite is perfect for mobile - No server needed, works offline
+
+Agent should be dynamic - Static schedules are useless
+
+Users want simplicity - One app, no external dependencies
+
+PWA is the future - Install on any device, no app store needed
+
+ðŸŽ¯ Immediate Next Action
+Fix the frontend-backend integration:
+
+Open browser console (F12) at http://localhost:3000
+
+Check Network tab for API calls
+
+Identify what's failing
+
+Fix the API calls in frontend/js/app.js
+
+Let me know what errors you see and I'll help fix them! ðŸš€
+
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\frontend\sw.js
+==================================================
+const CACHE_NAME = 'focus-agent-v1';
+const urlsToCache = [
+    '/',
+    '/index.html',
+    '/css/style.css',
+    '/js/app.js',
+    '/manifest.json'
+];
+
+self.addEventListener('install', event => {
+    event.waitUntil(
+        caches.open(CACHE_NAME)
+            .then(cache => cache.addAll(urlsToCache))
+    );
+});
+
+self.addEventListener('fetch', event => {
+    event.respondWith(
+        caches.match(event.request)
+            .then(response => response || fetch(event.request))
+    );
+});
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\docker-compose.yml
+==================================================
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\Dockerfile
+==================================================
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY backend/ .
+
+# Expose port
+EXPOSE 8000
+
+# Run
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+
+
+==================================================
+FILE: C:\Users\Administrator\Desktop\schedulerapp\focus-agent\README.md
+==================================================
+
+
+

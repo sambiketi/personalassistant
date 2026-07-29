@@ -492,4 +492,3 @@ async def get_progress(user_id: str):
     except Exception as e:
         logger.error(f"Error getting progress: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-

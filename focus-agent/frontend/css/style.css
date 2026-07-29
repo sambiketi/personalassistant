@@ -305,4 +305,166 @@ body {
     .quick-action { font-size: 10px; padding: 2px 8px; }
 }
 
-.hidden { display: none !important; }
+.hidden { display: none !important; }/* Vanguard Brain specific styles */
+.vanguard-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 10px 0;
+}
+
+.stat-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: #0a0a15;
+    border-radius: 8px;
+    border: 1px solid #1a1a2a;
+}
+
+.stat-label {
+    color: #8888aa;
+    font-size: 13px;
+}
+
+.stat-value {
+    color: #667eea;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+/* Dashboard section styles */
+.section {
+    background: #12121a;
+    border-radius: 16px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    border: 1px solid #2a2a3a;
+}
+
+.section h2 {
+    color: #8888aa;
+    margin-bottom: 12px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.goal-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #1a1a2a;
+}
+
+.goal-item:last-child { border-bottom: none; }
+
+.goal-progress {
+    flex: 1;
+    height: 8px;
+    background: #1a1a2a;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.goal-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea, #764ba2);
+    border-radius: 10px;
+    transition: width 0.5s;
+}
+
+.goal-percent {
+    min-width: 50px;
+    text-align: right;
+    color: #8888aa;
+    font-size: 13px;
+}
+
+.habit-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #1a1a2a;
+}
+
+.habit-item:last-child { border-bottom: none; }
+
+.habit-streak {
+    color: #ffaa44;
+    font-weight: 600;
+}
+
+.task-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #1a1a2a;
+}
+
+.task-item:last-child { border-bottom: none; }
+
+.task-time {
+    color: #667eea;
+    font-weight: 600;
+    min-width: 80px;
+    font-size: 13px;
+}
+
+.task-name { flex: 1; }
+
+.task-status {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.status-pending { background: #2a2a3a; color: #8888aa; }
+.status-completed { background: #1a3a2a; color: #55dd88; }
+.status-in_progress { background: #3a2a1a; color: #ffaa44; }
+.status-skipped { background: #3a1a1a; color: #ff6677; }
+
+/* Message styling for Vanguard Brain responses */
+.message .bubble strong {
+    color: #667eea;
+}
+
+/* Quick actions refresh */
+.quick-actions {
+    display: flex;
+    gap: 8px;
+    padding: 8px 0 4px 0;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.quick-action {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.quick-action:hover {
+    background: var(--border-color);
+    color: var(--text-primary);
+}
+
+.quick-action.emergency {
+    border-color: var(--accent-red);
+    color: var(--accent-red);
+}
+
+.quick-action.emergency:hover {
+    background: var(--accent-red);
+    color: white;
+}
