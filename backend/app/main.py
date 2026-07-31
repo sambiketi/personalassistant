@@ -27,7 +27,7 @@ from app.routes import dashboard
 # ==========================================
 DB_PATH = os.getenv("DB_PATH", "focus_agent.db")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").lower()
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# REMOVED: LLM_API_KEY - now comes from frontend
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 origins = ["*"] if CORS_ORIGINS.strip() == "*" else [o.strip() for o in CORS_ORIGINS.split(",")]
 
@@ -37,7 +37,7 @@ origins = ["*"] if CORS_ORIGINS.strip() == "*" else [o.strip() for o in CORS_ORI
 _db_instance = Database(db_path=DB_PATH)
 
 _llm_map = {"openai": OpenAIService, "anthropic": AnthropicService, "deepseek": DeepSeekService}
-_llm_instance: LLMService = _llm_map.get(LLM_PROVIDER, DeepSeekService)(LLM_API_KEY)
+_llm_instance: LLMService = _llm_map.get(LLM_PROVIDER, DeepSeekService)(None)  # ? No API key
 
 _brain_instance: Brain = VanguardBrain(llm=_llm_instance)
 

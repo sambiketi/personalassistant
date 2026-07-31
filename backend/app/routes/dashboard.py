@@ -18,7 +18,7 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 # ==========================================
-# Dependency wiring (overridden by main.py's app.dependency_overrides)
+# Dependency wiring (overridden by main.py)
 # ==========================================
 def get_database() -> Database:
     raise RuntimeError("Database dependency not configured")
@@ -46,6 +46,7 @@ def get_agent(
 class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     user_id: str = Field(default="demo_user", min_length=1, max_length=100)
+    api_key: Optional[str] = Field(default=None, description="LLM API key from frontend")  # ✅ ADDED
 
 
 class TaskCreate(BaseModel):
@@ -147,11 +148,6 @@ class TaskLog(BaseModel):
         return v
 
 
-class ApiKeyRequest(BaseModel):
-    user_id: str = Field(..., min_length=1, max_length=100)
-    api_key: str = Field(..., min_length=8, max_length=500)
-
-
 # ==========================================
 # Helper: convert DatabaseError -> HTTP 500 consistently
 # ==========================================
@@ -169,11 +165,26 @@ def _run(fn, *args, **kwargs):
 
 
 # ==========================================
-# AGENT CHAT
+# AGENT CHAT - UPDATED with API key support
 # ==========================================
 @router.post("/agent/process")
 async def process_message(request: MessageRequest, agent: FocusAgent = Depends(get_agent)):
     def _process():
+        # 🔑 Update LLM with API key from frontend
+        if request.api_key:
+            agent.llm.update_api_key(request.api_key)
+            logger.info(f"✅ API key updated for user {request.user_id}")
+        elif not agent.llm.enabled:
+            logger.warning(f"❌ No API key provided for user {request.user_id}")
+            return {
+                "success": False,
+                "error": "No API key provided",
+                "response": {
+                    "message": "🔑 Please enter your LLM API key in the settings above to enable AI features.",
+                    "intent": "error",
+                }
+            }
+        
         response = agent.process(request.user_id, request.message)
         return {
             "success": True,
@@ -190,23 +201,25 @@ async def process_message(request: MessageRequest, agent: FocusAgent = Depends(g
 
 
 # ==========================================
-# API KEY
+# API KEY - REMOVED (now handled by frontend localStorage)
 # ==========================================
-@router.post("/user/apikey")
-async def save_api_key(req: ApiKeyRequest, db: Database = Depends(get_database)):
-    def _save():
-        db.get_or_create_user(req.user_id)
-        db.save_api_key(req.user_id, req.api_key)
-        return {"success": True}
-    return _run(_save)
-
-
-@router.get("/user/apikey/status")
-async def api_key_status(user_id: str = "demo_user", db: Database = Depends(get_database)):
-    def _status():
-        key = db.get_api_key(user_id)
-        return {"success": True, "has_key": bool(key)}
-    return _run(_status)
+# The following endpoints are no longer needed since API keys are
+# managed entirely in the frontend via localStorage.
+#
+# @router.post("/user/apikey")
+# async def save_api_key(req: ApiKeyRequest, db: Database = Depends(get_database)):
+#     def _save():
+#         db.get_or_create_user(req.user_id)
+#         db.save_api_key(req.user_id, req.api_key)
+#         return {"success": True}
+#     return _run(_save)
+#
+# @router.get("/user/apikey/status")
+# async def api_key_status(user_id: str = "demo_user", db: Database = Depends(get_database)):
+#     def _status():
+#         key = db.get_api_key(user_id)
+#         return {"success": True, "has_key": bool(key)}
+#     return _run(_status)
 
 
 # ==========================================

@@ -79,9 +79,8 @@ class FocusAgent:
             self.user_id = user_id
             self.user_data = self.db.get_or_create_user(user_id)
 
-            api_key = self.user_data.get("api_key")
-            if api_key:
-                self.llm.update_api_key(api_key)
+            # REMOVED: API key lookup from database - now provided by frontend in the request
+        # The LLM is updated in the route handler before calling this method
 
             today = datetime.now().strftime("%Y-%m-%d")
             schedule_data = self.db.get_schedule(self.user_data["id"], today)

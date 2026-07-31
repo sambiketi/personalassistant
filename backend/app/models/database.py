@@ -36,7 +36,7 @@ def _migration_v1(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT UNIQUE NOT NULL,
-            api_key TEXT,
+            -- REMOVED: api_key TEXT,
             timezone TEXT DEFAULT 'UTC',
             wake_time TEXT DEFAULT '06:00',
             sleep_time TEXT DEFAULT '22:00',

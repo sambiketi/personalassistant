@@ -180,7 +180,7 @@ async function handleSend() {
       addMessage('agent', `✅ Added ${nl.kind}: "${nl.payload.name || nl.payload.title}"`);
       loadDashboardData();
     } else {
-      const { response } = await client.chat(text);
+      const { response } = await client.chat(text, state.apiKey);
       addMessage('agent', response.message);
       if (response.schedule) loadDashboardData();
       if (response.suggestions?.length) addMessage('agent', '💡 ' + response.suggestions.join('\n'));
@@ -266,7 +266,7 @@ async function saveApiKey() {
   }
   setButtonLoading(els.saveApiBtn, true);
   try {
-    await client.saveApiKey(key);
+    // REMOVED: saveApiKey() - now localStorage only;
     state.apiKey = key;
     localStorage.setItem('focus_api_key', key);
     els.apiStatus.textContent = '✅ API key saved!';

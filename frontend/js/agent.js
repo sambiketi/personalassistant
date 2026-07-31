@@ -19,19 +19,23 @@ class FocusAgentClient {
       throw new Error(`Server returned an invalid response (${res.status})`);
     }
     if (!res.ok) {
-      // FastAPI validation errors come back as {detail: [...]} or {detail: "..."}
       const detail = Array.isArray(data.detail)
         ? data.detail.map(d => d.msg).join(', ')
-        : (data.detail || `Request failed (${res.status})`);
+        : (data.detail || data.error || `Request failed (${res.status})`);
       throw new Error(detail);
     }
     return data;
   }
 
-  chat(message) {
+  // ✅ FIXED: Accepts API key parameter
+  chat(message, apiKey) {
     return this._request('/agent/process', {
       method: 'POST',
-      body: JSON.stringify({ message, user_id: this.userId }),
+      body: JSON.stringify({ 
+        message, 
+        user_id: this.userId,
+        api_key: apiKey || null
+      }),
     });
   }
 
@@ -74,32 +78,25 @@ class FocusAgentClient {
     return this._request(`/progress/${this.userId}/log`, { method: 'POST', body: JSON.stringify(log) });
   }
 
-  saveApiKey(apiKey) {
-    return this._request('/user/apikey', {
-      method: 'POST',
-      body: JSON.stringify({ user_id: this.userId, api_key: apiKey }),
-    });
-  }
+  // REMOVED: saveApiKey() - now handled entirely in localStorage by app.js
+  // The app.js saveApiKey() function now only uses localStorage
 }
 
 // ==========================================
 // NATURAL LANGUAGE COMMAND ROUTER
-// Recognizes structured "add X" phrasing and maps it straight to a POST
-// helper instead of round-tripping through the full LLM chat pipeline.
-// Falls through to `handled: false` for anything else (free-form chat).
 // ==========================================
 const NL_PATTERNS = {
-  // "add task Deep work at 10am" / "add deep work block at 10:30"
   task: /^add\s+(?:a\s+)?(?:task\s+)?(.+?)\s+(?:at|@)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i,
-  // "add goal Learn Spanish" / "add goal Learn Spanish in Education"
   goal: /^add\s+goal\s+(.+)$/i,
-  // "add habit Morning run" / "start habit Meditate daily"
   habit: /^(?:add|start)\s+habit\s+(.+)$/i,
 };
 
 function _to24h(hour, minute, meridiem) {
   let h = parseInt(hour, 10);
-  const m = minute ? parseInt(minute, 10) : 0;
+  const m = minute !== undefined && minute !== null ? parseInt(minute, 10) : 0;
+  if (isNaN(m)) {
+    return `${String(h).padStart(2, '0')}:00`;
+  }
   if (meridiem) {
     const mer = meridiem.toLowerCase();
     if (mer === 'pm' && h < 12) h += 12;
@@ -108,10 +105,6 @@ function _to24h(hour, minute, meridiem) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-/**
- * Try to interpret free text as a structured command.
- * Returns { handled: true, kind, payload, promise } if matched, else { handled: false }.
- */
 function parseNaturalLanguageCommand(text, client) {
   const taskMatch = text.match(NL_PATTERNS.task);
   if (taskMatch) {
