@@ -1,0 +1,150 @@
+/* ========================================== GLOBAL ========================================== */
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #0a0a0f;
+  color: #e0e0f0;
+}
+h1, h2, h3 { margin: 0; font-weight: 600; }
+button { cursor: pointer; border: none; background: none; color: inherit; font: inherit; }
+
+/* ========================================== HEADER ========================================== */
+.header {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #12121a; padding: 12px 20px; border-bottom: 1px solid #2a2a3a;
+}
+.header-left { display: flex; align-items: center; gap: 10px; }
+.logo { font-size: 1.5em; }
+.badge { background: #667eea; color: #fff; padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+.header-actions { display: flex; gap: 8px; }
+.header-btn { background: #1a1a2a; border-radius: 6px; padding: 6px 10px; font-size: 14px; }
+
+/* ========================================== STATUS BAR ========================================== */
+.status-bar {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #0f0f15; padding: 8px 16px; border-bottom: 1px solid #2a2a3a; font-size: 14px;
+}
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.status-dot.online { background: #55dd88; }
+.status-dot.offline { background: #ff6677; }
+.status-dot.processing { background: #ffaa44; }
+
+/* ========================================== API SECTION ========================================== */
+.api-section { padding: 12px 16px; background: #12121a; border-bottom: 1px solid #2a2a3a; }
+.api-row { display: flex; gap: 8px; }
+.api-row input { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #2a2a3a; background: #0a0a15; color: #e0e0f0; }
+.api-status { margin-top: 8px; font-size: 13px; }
+.api-status.ready { color: #55dd88; }
+.api-status.error { color: #ff6677; }
+
+/* ========================================== DASHBOARD SECTIONS ========================================== */
+.section { background: #12121a; border-radius: 16px; padding: 20px; margin: 16px; border: 1px solid #2a2a3a; }
+.section h2 { color: #8888aa; margin-bottom: 12px; font-size: 16px; font-weight: 600; }
+.empty-hint { color: #555577; text-align: center; padding: 20px; }
+
+.task-item, .goal-item, .habit-item {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #1a1a2a;
+}
+.task-item:last-child, .goal-item:last-child, .habit-item:last-child { border-bottom: none; }
+
+.task-time { color: #667eea; font-weight: 600; min-width: 80px; }
+.task-status { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.status-pending { background: #2a2a3a; color: #8888aa; }
+.status-completed { background: #1a3a2a; color: #55dd88; }
+.status-in_progress { background: #3a2a1a; color: #ffaa44; }
+.status-skipped { background: #3a1a1a; color: #ff6677; }
+.status-postponed { background: #2a2a1a; color: #ddbb55; }
+
+.goal-progress { flex: 1; height: 8px; background: #1a1a2a; border-radius: 10px; overflow: hidden; }
+.goal-progress-bar { height: 100%; background: linear-gradient(90deg, #667eea, #764ba2); border-radius: 10px; transition: width 0.5s; }
+.goal-percent { min-width: 50px; text-align: right; color: #8888aa; }
+.habit-streak { color: #ffaa44; font-weight: 600; }
+
+.vanguard-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 0; }
+.stat-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: #0a0a15; border-radius: 8px; border: 1px solid #1a1a2a;
+}
+.stat-label { color: #8888aa; font-size: 13px; }
+.stat-value { color: #667eea; font-weight: 600; font-size: 14px; }
+
+/* ---- Forms ---- */
+.section form {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; padding: 12px;
+  background: #0a0a15; border-radius: 10px; border: 1px solid #1a1a2a; align-items: center;
+}
+.section form input, .section form select {
+  flex: 1; min-width: 120px; padding: 8px 12px; background: #1a1a2a;
+  border: 1px solid #2a2a3a; border-radius: 8px; color: #ddd; font-size: 13px;
+  outline: none; transition: border-color 0.2s;
+}
+.section form input:focus, .section form select:focus { border-color: #667eea; }
+.section form input::placeholder { color: #555577; }
+
+/* ---- Buttons with spinner state ---- */
+.section form button, #saveApiBtn {
+  padding: 8px 16px; background: #667eea; border-radius: 8px; color: white;
+  font-weight: 600; font-size: 13px; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  transition: background 0.2s, transform 0.1s;
+}
+.section form button:hover, #saveApiBtn:hover { background: #5a6fd6; }
+.section form button:active, #saveApiBtn:active { transform: scale(0.97); }
+.section form button:disabled, #saveApiBtn:disabled { opacity: 0.65; cursor: not-allowed; transform: none; }
+
+.btn-spinner {
+  display: none; width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+  animation: spin 0.7s linear infinite;
+}
+button.loading .btn-label { opacity: 0.6; }
+button.loading .btn-spinner { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Fade-out feedback ---- */
+.form-msg {
+  display: inline-block; margin-left: 10px; font-size: 13px; font-weight: 600;
+  flex: 0 0 100%; text-align: center; opacity: 0; transition: opacity 0.4s ease;
+}
+.form-msg.visible { opacity: 1; }
+.form-msg.success { color: #55dd88; }
+.form-msg.error { color: #ff6677; }
+
+@media (max-width: 480px) {
+  .section form { flex-direction: column; }
+  .section form input, .section form select { min-width: auto; width: 100%; }
+  .section form button { width: 100%; }
+  .form-msg { margin-left: 0; margin-top: 5px; }
+}
+
+/* ========================================== CHAT AREA ========================================== */
+.chat-area { display: flex; flex-direction: column; height: 40vh; border-top: 1px solid #2a2a3a; }
+.messages { flex: 1; overflow-y: auto; padding: 16px; }
+.message { display: flex; gap: 10px; margin-bottom: 12px; }
+.message .avatar { font-size: 1.2em; }
+.message .bubble { background: #1a1a2a; padding: 10px 14px; border-radius: 12px; max-width: 70%; position: relative; }
+.message.user .bubble { background: #2a2a3a; }
+.message.agent .bubble { background: #0f0f15; }
+.message .time { display: block; font-size: 11px; color: #8888aa; margin-top: 4px; text-align: right; }
+
+.empty-state { text-align: center; padding: 30px 16px; color: #8888aa; }
+.empty-state .icon { font-size: 2em; margin-bottom: 8px; }
+.empty-state.hidden { display: none; }
+
+.quick-actions { display: flex; gap: 8px; padding: 8px; background: #12121a; border-top: 1px solid #2a2a3a; }
+.quick-action { flex: 1; background: #1a1a2a; border-radius: 6px; padding: 8px; font-size: 13px; }
+.quick-action.emergency { background: #3a1a1a; color: #ff6677; }
+
+.input-bar { display: flex; padding: 8px; background: #12121a; border-top: 1px solid #2a2a3a; }
+.input-bar textarea { flex: 1; resize: none; border: none; border-radius: 6px; padding: 8px; background: #0a0a15; color: #e0e0f0; }
+.send-btn { margin-left: 8px; background: #667eea; color: #fff; border-radius: 6px; padding: 0 16px; display: flex; align-items: center; justify-content: center; position: relative; }
+.send-icon { font-size: 16px; }
+.send-btn .spinner {
+  display: none; width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff; animation: spin 0.7s linear infinite;
+}
+.send-btn.loading .send-icon { display: none; }
+.send-btn.loading .spinner { display: inline-block; }
+
+/* ========================================== FOOTER ========================================== */
+.footer { text-align: center; padding: 12px; font-size: 13px; color: #8888aa; border-top: 1px solid #2a2a3a; }

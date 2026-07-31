@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>🎯 Focus Agent</title>
+
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
+  <link rel="apple-touch-icon" href="/icons/icon-512.png" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+
+    <header class="header">
+      <div class="header-left">
+        <span class="logo">🎯</span>
+        <h1>Focus Agent</h1>
+        <span class="badge">v2</span>
+      </div>
+      <div class="header-actions">
+        <button class="header-btn" id="clearBtn" title="Clear chat">✕</button>
+        <button class="header-btn" id="installBtn">📱</button>
+      </div>
+    </header>
+
+    <div class="status-bar">
+      <div class="status-indicator">
+        <span class="status-dot online" id="statusDot"></span>
+        <span id="statusText">Ready</span>
+      </div>
+      <div class="task-count">📋 <span id="taskCount">0</span> tasks</div>
+    </div>
+
+    <div class="api-section" id="apiSection">
+      <div class="api-row">
+        <input type="password" id="apiKeyInput" placeholder="sk-... enter LLM API key" />
+        <button id="saveApiBtn"><span class="btn-label">Save Key</span><span class="btn-spinner"></span></button>
+      </div>
+      <div class="api-status" id="apiStatus">🔑 Enter your API key to enable AI scheduling (optional)</div>
+    </div>
+
+    <div id="dashboard">
+      <div class="section">
+        <h2>📅 Today's Schedule</h2>
+        <form id="taskForm">
+          <input type="text" id="taskName" placeholder="Task name" required maxlength="200" />
+          <input type="time" id="taskTime" />
+          <button type="submit"><span class="btn-label">➕ Add Task</span><span class="btn-spinner"></span></button>
+          <span id="taskMsg" class="form-msg"></span>
+        </form>
+        <div id="scheduleList">
+          <div class="empty-hint">No tasks scheduled. Create one!</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>🎯 Active Goals</h2>
+        <form id="goalForm">
+          <input type="text" id="goalTitle" placeholder="Goal title" required maxlength="200" />
+          <input type="text" id="goalCategory" placeholder="Category" maxlength="50" />
+          <button type="submit"><span class="btn-label">➕ Add Goal</span><span class="btn-spinner"></span></button>
+          <span id="goalMsg" class="form-msg"></span>
+        </form>
+        <div id="goalsList">
+          <div class="empty-hint">No goals set. Add your first goal!</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>🔥 Habits & Streaks</h2>
+        <form id="habitForm">
+          <input type="text" id="habitName" placeholder="Habit name" required maxlength="200" />
+          <select id="habitFrequency">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <button type="submit"><span class="btn-label">➕ Add Habit</span><span class="btn-spinner"></span></button>
+          <span id="habitMsg" class="form-msg"></span>
+        </form>
+        <div id="habitsList">
+          <div class="empty-hint">No habits tracked. Start a habit today!</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>📈 Progress</h2>
+        <div id="progressStats" class="vanguard-stats">
+          <div class="empty-hint">No progress data yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-area">
+      <div class="messages" id="messages">
+        <div class="empty-state" id="emptyState">
+          <div class="icon">🧠</div>
+          <h3>Your AI Scheduling Agent</h3>
+          <p>Tell me your schedule, and I'll adapt when things change.<br />
+          Try: <em>"Add deep work block at 10am"</em> or <em>"I completed 25 minutes of work"</em></p>
+        </div>
+      </div>
+
+      <div class="quick-actions">
+        <button class="quick-action" data-text="I completed 15 minutes of work">✅ Log Win</button>
+        <button class="quick-action emergency" data-text="I skipped today because of work">⏰ Log Skip</button>
+        <button class="quick-action" data-text="Show my progress">📊 Progress</button>
+        <button class="quick-action" data-text="Plan my day">🎯 Plan</button>
+      </div>
+
+      <div class="input-bar">
+        <textarea id="userInput" rows="1" placeholder="Type your message..." aria-label="Type your message"></textarea>
+        <button class="send-btn" id="sendBtn">
+          <span class="send-icon">➤</span>
+          <div class="spinner"></div>
+        </button>
+      </div>
+    </div>
+
+    <div class="footer">Works offline · Adaptive AI Agent · 🧠 Vanguard Brain</div>
+  </div>
+
+  <script src="/js/agent.js"></script>
+  <script src="/js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(reg => console.log('✅ Service Worker registered', reg))
+        .catch(err => console.error('❌ Service Worker failed', err));
+    }
+  </script>
+</body>
+</html>

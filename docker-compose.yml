@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    environment:
+      - DB_PATH=${DB_PATH:-/data/focus_agent.db}
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - PORT=${PORT:-8000}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    volumes:
+      - db_data:/data
+      - ./backend:/app
+    command: python run_server.py
+
+volumes:
+  db_data:
