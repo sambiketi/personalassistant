@@ -1,0 +1,2996 @@
+﻿================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\core\agent.py
+================================================================================
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+
+from app.core.brain_interface import Brain
+from app.core.robust_parser import robust_parse_ai_response
+from app.services.llm_interface import LLMService
+from app.models.database import Database
+
+logger = logging.getLogger(__name__)
+
+
+class Intent(Enum):
+    CREATE_SCHEDULE = "create_schedule"
+    LOG_VANGUARD_WIN = "log_vanguard_win"
+    LOG_VANGUARD_SKIP = "log_vanguard_skip"
+    SHOW_SCHEDULE = "show_schedule"
+    SHOW_PROGRESS = "show_progress"
+    SHOW_ANALYTICS = "show_analytics"
+    GENERAL_CHAT = "general_chat"
+
+
+@dataclass
+class Task:
+    id: str
+    name: str
+    start_time: str
+    end_time: str
+    duration: int
+    priority: int
+    status: str
+    category: str
+    notes: str = ""
+    is_flexible: bool = True
+
+
+@dataclass
+class Schedule:
+    date: str
+    tasks: List[Task]
+    total_hours: float = 0
+    completion_rate: float = 0
+
+    def to_dict(self) -> Dict:
+        return {
+            "date": self.date,
+            "tasks": [t.__dict__ for t in self.tasks],
+            "total_hours": self.total_hours,
+            "completion_rate": self.completion_rate,
+        }
+
+
+@dataclass
+class AgentResponse:
+    intent: Intent
+    message: str
+    schedule: Optional[Schedule] = None
+    suggestions: List[str] = field(default_factory=list)
+    reasoning: str = ""
+    changed_tasks: List[str] = field(default_factory=list)
+    vanguard_data: Optional[Dict] = None
+
+
+class FocusAgent:
+    """Main agent engine orchestrating intents with pluggable Brain + LLM."""
+
+    def __init__(self, db: Database, llm: LLMService, brain: Brain):
+        self.db = db
+        self.llm = llm
+        self.brain = brain
+        self.current_schedule: Optional[Schedule] = None
+        self.user_id: Optional[str] = None
+        self.user_data: Optional[Dict] = None
+
+    def process(self, user_id: str, user_input: str) -> AgentResponse:
+        try:
+            self.user_id = user_id
+            self.user_data = self.db.get_or_create_user(user_id)
+
+            # REMOVED: API key lookup from database - now provided by frontend in the request
+        # The LLM is updated in the route handler before calling this method
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            schedule_data = self.db.get_schedule(self.user_data["id"], today)
+            if schedule_data:
+                self.current_schedule = Schedule(
+                    date=schedule_data["date"],
+                    tasks=[Task(**t) for t in schedule_data.get("tasks", [])],
+                    total_hours=schedule_data.get("total_hours", 0),
+                    completion_rate=schedule_data.get("completion_rate", 0),
+                )
+
+            vanguard_intent = self.detect_vanguard_intent(user_input)
+            if vanguard_intent:
+                return self.handle_vanguard_intent(vanguard_intent, user_input)
+
+            intent, entities = self.detect_intent(user_input)
+            handler_map = {
+                Intent.CREATE_SCHEDULE: self.handle_create_schedule,
+                Intent.SHOW_SCHEDULE: lambda *_: self.handle_show_schedule(),
+                Intent.SHOW_PROGRESS: lambda *_: self.handle_show_progress(),
+                Intent.SHOW_ANALYTICS: lambda *_: self.handle_show_analytics(),
+                Intent.GENERAL_CHAT: self.handle_general_chat,
+            }
+            return handler_map.get(intent, self.handle_general_chat)(user_input, entities)
+
+        except Exception as e:
+            logger.error(f"Error processing input: {e}")
+            return AgentResponse(intent=Intent.GENERAL_CHAT, message=f"âš ï¸ Error: {e}")
+
+    def detect_vanguard_intent(self, user_input: str) -> Optional[Intent]:
+        text = user_input.lower()
+        if "completed" in text or "win" in text:
+            return Intent.LOG_VANGUARD_WIN
+        if "skip" in text or "didn't" in text:
+            return Intent.LOG_VANGUARD_SKIP
+        return None
+
+    def handle_vanguard_intent(self, intent: Intent, user_input: str) -> AgentResponse:
+        result = self.brain.process_vanguard_intent(intent, user_input)
+        return AgentResponse(intent=intent, message=result.get("message", ""), vanguard_data=result.get("data", {}))
+
+    def detect_intent(self, user_input: str) -> Tuple[Intent, Dict]:
+        text = user_input.lower()
+        if "schedule" in text or "plan" in text:
+            return Intent.CREATE_SCHEDULE, {"description": user_input}
+        if "progress" in text or "status" in text:
+            return Intent.SHOW_PROGRESS, {}
+        if "analytics" in text or "stats" in text:
+            return Intent.SHOW_ANALYTICS, {}
+        return Intent.GENERAL_CHAT, {}
+
+    def handle_create_schedule(self, user_input: str, entities: Dict) -> AgentResponse:
+        today = datetime.now().strftime("%Y-%m-%d")
+        prompt = f"Create a schedule for {today} based on: {user_input}"
+        raw_response = self.llm.generate(prompt)
+        parsed, error = robust_parse_ai_response(raw_response, today)
+
+        if error or not parsed.get("tasks"):
+            return AgentResponse(
+                intent=Intent.CREATE_SCHEDULE,
+                message="âš ï¸ Could not parse a schedule from that. Try being more specific, e.g. "
+                "'Plan my day: gym at 7am, deep work 9-11, lunch at 12'.",
+            )
+
+        tasks = [Task(**t) for t in parsed["tasks"]]
+        schedule = Schedule(date=today, tasks=tasks)
+        self.db.save_schedule(self.user_data["id"], today, schedule.to_dict())
+        self.current_schedule = schedule
+
+        return AgentResponse(
+            intent=Intent.CREATE_SCHEDULE,
+            message=f"âœ… Schedule created for {today}",
+            schedule=schedule,
+            suggestions=parsed.get("suggestions", []),
+            reasoning=parsed.get("reasoning", ""),
+        )
+
+    def handle_show_schedule(self) -> AgentResponse:
+        if not self.current_schedule:
+            return AgentResponse(intent=Intent.SHOW_SCHEDULE, message="No active schedule.")
+        return AgentResponse(
+            intent=Intent.SHOW_SCHEDULE,
+            message=f"ðŸ“… Schedule for {self.current_schedule.date}",
+            schedule=self.current_schedule,
+        )
+
+    def handle_show_progress(self) -> AgentResponse:
+        return AgentResponse(
+            intent=Intent.SHOW_PROGRESS,
+            message=self.brain.get_progress_report(),
+            vanguard_data=self.brain.get_stats(),
+        )
+
+    def handle_show_analytics(self) -> AgentResponse:
+        return AgentResponse(intent=Intent.SHOW_ANALYTICS, message=self.brain.get_analytics_summary())
+
+    def handle_general_chat(self, user_input: str, entities: Dict = None) -> AgentResponse:
+        response = self.llm.generate(f"User says: {user_input}")
+        return AgentResponse(intent=Intent.GENERAL_CHAT, message=response)
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\core\brain_interface.py
+================================================================================
+from abc import ABC, abstractmethod
+from typing import Dict
+
+
+class Brain(ABC):
+    """Pluggable behavioral-tracking engine interface (e.g. VanguardBrain)."""
+
+    @abstractmethod
+    def process_vanguard_intent(self, intent, user_input: str) -> Dict:
+        """Handle a win/skip style intent, return {'message': str, 'data': dict}."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_stats(self) -> Dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_progress_report(self) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_analytics_summary(self) -> str:
+        raise NotImplementedError
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\core\robust_parser.py
+================================================================================
+import json
+import re
+import logging
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+class RobustJSONParser:
+    """Robust JSON parser with multiple fallback strategies for messy LLM output."""
+
+    @staticmethod
+    def extract_json(text: str) -> Optional[str]:
+        if not text:
+            return None
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            return m.group()
+        m = re.search(r"\[[\s\S]*\]", text)
+        if m:
+            return m.group()
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        if m:
+            return m.group(1)
+        return None
+
+    @staticmethod
+    def clean_json(json_str: str) -> str:
+        if not json_str:
+            return json_str
+        json_str = re.sub(r",\s*}", "}", json_str)
+        json_str = re.sub(r",\s*]", "]", json_str)
+        json_str = re.sub(r",\s*,", ",", json_str)
+        json_str = re.sub(r"'([^']*)'", r'"\1"', json_str)
+        json_str = re.sub(r"//.*?$", "", json_str, flags=re.MULTILINE)
+        json_str = re.sub(r"/\*.*?\*/", "", json_str, flags=re.DOTALL)
+        json_str = re.sub(r"([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:", r'\1"\2":', json_str)
+        return json_str
+
+    @staticmethod
+    def parse_with_retry(text: str) -> Tuple[Optional[Dict], Optional[str]]:
+        if not text:
+            return None, "Empty input"
+
+        strategies = [
+            lambda t: json.loads(t),
+            lambda t: json.loads(RobustJSONParser.clean_json(t)),
+            lambda t: json.loads(RobustJSONParser._fix_common_json_issues(t)),
+        ]
+        for i, strategy in enumerate(strategies):
+            try:
+                json_text = RobustJSONParser.extract_json(text) or text
+                cleaned = RobustJSONParser.clean_json(json_text)
+                result = strategy(cleaned)
+                if result:
+                    logger.info(f"JSON parsed with strategy {i + 1}")
+                    return result, None
+            except Exception as e:
+                logger.debug(f"Strategy {i + 1} failed: {e}")
+                continue
+
+        try:
+            result = RobustJSONParser._salvage_partial_json(text)
+            if result:
+                return result, "Partial JSON recovered"
+        except Exception:
+            pass
+
+        return None, "Failed to parse JSON after all retries"
+
+    @staticmethod
+    def _fix_common_json_issues(text: str) -> str:
+        text = re.sub(r"}\s*{", "},{", text)
+        open_braces, close_braces = text.count("{"), text.count("}")
+        if open_braces > close_braces:
+            text += "}" * (open_braces - close_braces)
+        open_brackets, close_brackets = text.count("["), text.count("]")
+        if open_brackets > close_brackets:
+            text += "]" * (open_brackets - close_brackets)
+        return text
+
+    @staticmethod
+    def _salvage_partial_json(text: str) -> Optional[Dict]:
+        try:
+            pairs = re.findall(r'"([^"]+)"\s*:\s*"([^"]*)"', text)
+            if pairs:
+                return {k: v for k, v in pairs}
+            return None
+        except Exception:
+            return None
+
+
+class ScheduleParser:
+    @staticmethod
+    def parse_tasks(tasks_data: List[Dict]) -> List[Dict]:
+        parsed = []
+        for i, task in enumerate(tasks_data):
+            try:
+                start_time = task.get("start_time") or f"{6 + i * 2:02d}:00"
+                end_time = task.get("end_time") or f"{7 + i * 2:02d}:00"
+                duration = task.get("duration")
+                if not duration:
+                    try:
+                        sd = datetime.strptime(start_time, "%H:%M")
+                        ed = datetime.strptime(end_time, "%H:%M")
+                        duration = int((ed - sd).total_seconds() / 60)
+                    except Exception:
+                        duration = 60
+                parsed.append(
+                    {
+                        "id": task.get("id", str(i + 1)),
+                        "name": task.get("name", "Untitled Task"),
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "duration": duration,
+                        "priority": task.get("priority", 3),
+                        "status": task.get("status", "pending"),
+                        "category": task.get("category", "general"),
+                        "notes": task.get("notes", ""),
+                        "is_flexible": task.get("is_flexible", True),
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Error parsing task {i}: {e}")
+        return parsed
+
+    @staticmethod
+    def create_schedule_from_json(data: Dict, date_str: str = None) -> Dict:
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        tasks_data = data.get("tasks") or data.get("schedule") or data.get("tasks_list") or []
+        parsed_tasks = ScheduleParser.parse_tasks(tasks_data)
+        total_hours = sum(t.get("duration", 0) for t in parsed_tasks) / 60
+        return {
+            "date": date_str,
+            "tasks": parsed_tasks,
+            "total_hours": total_hours,
+            "completion_rate": data.get("completion_rate", 0),
+            "reasoning": data.get("reasoning", ""),
+            "suggestions": data.get("suggestions", []),
+        }
+
+
+def robust_parse_ai_response(response: str, date_str: str = None) -> Tuple[Optional[Dict], Optional[str]]:
+    if not response:
+        return None, "Empty response from AI"
+    data, error = RobustJSONParser.parse_with_retry(response)
+    if not data:
+        return None, error or "No data extracted from response"
+    try:
+        return ScheduleParser.create_schedule_from_json(data, date_str), None
+    except Exception as e:
+        return None, f"Schedule creation failed: {e}"
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\core\vanguard_brain.py
+================================================================================
+import logging
+from collections import Counter
+from datetime import datetime
+from typing import Dict, List, Optional
+
+from app.services.llm_interface import LLMService
+from app.core.brain_interface import Brain
+
+logger = logging.getLogger(__name__)
+
+
+class VanguardBrain(Brain):
+    """
+    Pluggable Brain implementation: wins/skips, sabotage detection, progress reports.
+    Delegates actual text generation to an injected LLMService.
+    """
+
+    def __init__(
+        self,
+        user_name: str = "friend",
+        core_ambition: str = "your focus goal",
+        llm: Optional[LLMService] = None,
+        starting_block_mins: int = 15,
+    ):
+        self.user_name = user_name
+        self.core_ambition = core_ambition
+        self.llm = llm
+        self.current_block_mins = starting_block_mins
+        self.target_block_mins = 240
+
+        self.wins_history: List[Dict] = []
+        self.skip_reasons_log: List[str] = []
+        self.streak_count = 0
+        self.longest_streak = 0
+
+        logger.info(f"ðŸ§  VanguardBrain initialized for {user_name}")
+
+    def get_stats(self) -> Dict:
+        return {
+            "user_name": self.user_name,
+            "core_ambition": self.core_ambition,
+            "current_block_mins": self.current_block_mins,
+            "target_block_mins": self.target_block_mins,
+            "streak_count": self.streak_count,
+            "longest_streak": self.longest_streak,
+            "total_wins": len(self.wins_history),
+            "skip_reasons_log": self.skip_reasons_log[-5:],
+            "progress_to_target": min(100, int((self.current_block_mins / self.target_block_mins) * 100)),
+        }
+
+    def process_vanguard_intent(self, intent, user_input: str) -> Dict:
+        if intent.value == "log_vanguard_win":
+            return self._process_win(user_input)
+        elif intent.value == "log_vanguard_skip":
+            return self._process_skip(user_input)
+        return {"message": "No Vanguard intent detected", "data": self.get_stats()}
+
+    def _process_win(self, user_input: str) -> Dict:
+        self.streak_count += 1
+        self.longest_streak = max(self.longest_streak, self.streak_count)
+
+        win_description = f"Completed {self.current_block_mins} mins on '{self.core_ambition}'"
+        self.wins_history.append({"date": datetime.now().isoformat(), "win": win_description})
+
+        if len(self.wins_history) >= 3 and self.current_block_mins < self.target_block_mins:
+            self.current_block_mins += 15
+
+        message = self._generate_llm_response("win", user_input)
+        return {"message": message, "data": self.get_stats()}
+
+    def _process_skip(self, user_input: str) -> Dict:
+        self.streak_count = 0
+        reason = user_input.strip().lower()[:100]
+        self.skip_reasons_log.append(reason)
+
+        frequency = Counter(self.skip_reasons_log)[reason]
+        mode = "sabotage" if frequency >= 4 else "skip"
+        message = self._generate_llm_response(mode, reason)
+        return {"message": message, "data": self.get_stats()}
+
+    def get_progress_report(self) -> str:
+        return self._generate_llm_response("progress", "")
+
+    def get_analytics_summary(self) -> str:
+        stats = self.get_stats()
+        return f"ðŸ“ˆ Analytics: {stats['total_wins']} wins, {stats['streak_count']} streak, {stats['progress_to_target']}% progress"
+
+    def _generate_llm_response(self, mode: str, context: str) -> str:
+        if not self.llm or not self.llm.enabled:
+            return f"[Fallback] {mode.capitalize()} response for {self.user_name}"
+
+        prompt = (
+            f"Mode: {mode}\nUser: {self.user_name}\nAmbition: {self.core_ambition}\n"
+            f"Context: {context}\nStats: {self.get_stats()}"
+        )
+        try:
+            return self.llm.generate(prompt)
+        except Exception as e:
+            logger.error(f"LLM error in {mode} response: {e}")
+            return f"[Fallback] {mode.capitalize()} response for {self.user_name}"
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\core\__init__.py
+================================================================================
+# package
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\models\database.py
+================================================================================
+"""
+SQLite data-access layer for Focus Agent.
+
+Design notes for this refactor:
+- Lightweight migration system driven by `PRAGMA user_version` so the schema
+  can evolve without wiping data. Add new steps to `_MIGRATIONS`.
+- CHECK constraints enforce invariants at the DB layer (progress 0-100, etc.)
+  as a second line of defense behind Pydantic validation in the routes.
+- Streak calculation now walks actual calendar dates (not just "last 30 rows"),
+  so a habit logged sporadically over months still gets a correct streak
+  instead of silently truncating at 30 log rows.
+"""
+import sqlite3
+import json
+import logging
+from datetime import datetime, date, timedelta
+from typing import Dict, List, Optional, Any
+from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
+
+
+class DatabaseError(Exception):
+    """Raised for any unexpected DB failure; routes translate this to HTTP 500."""
+    pass
+
+
+# ==========================================
+# MIGRATIONS
+# ==========================================
+# Each entry is (target_version, sql_or_callable). Applied in order, once,
+# tracked via PRAGMA user_version. Never edit a past migration - append new ones.
+
+def _migration_v1(conn: sqlite3.Connection):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT UNIQUE NOT NULL,
+            -- REMOVED: api_key TEXT,
+            timezone TEXT DEFAULT 'UTC',
+            wake_time TEXT DEFAULT '06:00',
+            sleep_time TEXT DEFAULT '22:00',
+            preferred_work_hours TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            schedule_data TEXT NOT NULL,
+            version INTEGER DEFAULT 1,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(user_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            category TEXT,
+            priority INTEGER DEFAULT 3 CHECK(priority BETWEEN 1 AND 5),
+            status TEXT DEFAULT 'active' CHECK(status IN ('active','completed','archived')),
+            target_date TEXT,
+            progress REAL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS habits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            frequency TEXT DEFAULT 'daily' CHECK(frequency IN ('daily','weekly')),
+            target_count INTEGER DEFAULT 1 CHECK(target_count > 0),
+            current_streak INTEGER DEFAULT 0 CHECK(current_streak >= 0),
+            longest_streak INTEGER DEFAULT 0 CHECK(longest_streak >= 0),
+            status TEXT DEFAULT 'active' CHECK(status IN ('active','paused','archived')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS habit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            completed INTEGER DEFAULT 1 CHECK(completed IN (0,1)),
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (habit_id) REFERENCES habits(id) ON DELETE CASCADE,
+            UNIQUE(habit_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            task_name TEXT NOT NULL,
+            scheduled_time TEXT,
+            actual_time TEXT,
+            status TEXT CHECK(status IN ('pending','in_progress','completed','skipped','postponed')),
+            duration INTEGER CHECK(duration IS NULL OR duration >= 0),
+            date TEXT NOT NULL,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_habit_logs_habit_date ON habit_logs(habit_id, date);
+        CREATE INDEX IF NOT EXISTS idx_task_history_user_date ON task_history(user_id, date);
+        CREATE INDEX IF NOT EXISTS idx_schedules_user_date ON schedules(user_id, date);
+    """)
+
+
+_MIGRATIONS = [
+    (1, _migration_v1),
+    # (2, _migration_v2), append future migrations here
+]
+
+CURRENT_SCHEMA_VERSION = _MIGRATIONS[-1][0]
+
+
+class Database:
+    def __init__(self, db_path: str = "focus_agent.db"):
+        self.db_path = db_path
+        self._migrate()
+
+    @contextmanager
+    def get_connection(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _migrate(self):
+        """Apply any migrations not yet applied, tracked via PRAGMA user_version."""
+        with self.get_connection() as conn:
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            for version, step in _MIGRATIONS:
+                if current < version:
+                    logger.info(f"Applying DB migration -> v{version}")
+                    step(conn)
+                    conn.execute(f"PRAGMA user_version = {version}")
+                    conn.commit()
+                    current = version
+            logger.info(f"âœ… Database ready (schema v{current})")
+
+    # ==========================================
+    # USER METHODS
+    # ==========================================
+
+    def get_or_create_user(self, user_id: str) -> Dict:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+                user = cursor.fetchone()
+                if user:
+                    return dict(user)
+                cursor.execute(
+                    "INSERT INTO users (user_id, created_at, updated_at) "
+                    "VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (user_id,),
+                )
+                conn.commit()
+                cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+                return dict(cursor.fetchone())
+        except sqlite3.Error as e:
+            raise DatabaseError(f"get_or_create_user failed: {e}") from e
+
+    def save_api_key(self, user_id: str, api_key: str):
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE users SET api_key = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (api_key, user_id),
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            raise DatabaseError(f"save_api_key failed: {e}") from e
+
+    def get_api_key(self, user_id: str) -> Optional[str]:
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT api_key FROM users WHERE user_id = ?", (user_id,)
+                ).fetchone()
+                return row["api_key"] if row else None
+        except sqlite3.Error as e:
+            raise DatabaseError(f"get_api_key failed: {e}") from e
+
+    # ==========================================
+    # SCHEDULE METHODS
+    # ==========================================
+
+    def save_schedule(self, user_id: int, date_str: str, schedule_data: Dict) -> int:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                existing = cursor.execute(
+                    "SELECT id FROM schedules WHERE user_id = ? AND date = ?",
+                    (user_id, date_str),
+                ).fetchone()
+                if existing:
+                    cursor.execute(
+                        "UPDATE schedules SET schedule_data = ?, version = version + 1, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (json.dumps(schedule_data), existing["id"]),
+                    )
+                    conn.commit()
+                    return existing["id"]
+                cursor.execute(
+                    "INSERT INTO schedules (user_id, date, schedule_data) VALUES (?, ?, ?)",
+                    (user_id, date_str, json.dumps(schedule_data)),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except sqlite3.Error as e:
+            raise DatabaseError(f"save_schedule failed: {e}") from e
+
+    def add_task_to_schedule(self, user_id: int, date_str: str, task: Dict) -> Dict:
+        """Merge a single task into the day's schedule instead of overwriting it."""
+        try:
+            existing = self.get_schedule(user_id, date_str) or {"tasks": []}
+            existing.setdefault("tasks", []).append(task)
+            self.save_schedule(user_id, date_str, existing)
+            return existing
+        except sqlite3.Error as e:
+            raise DatabaseError(f"add_task_to_schedule failed: {e}") from e
+
+    def get_schedule(self, user_id: int, date_str: str) -> Optional[Dict]:
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT schedule_data FROM schedules "
+                    "WHERE user_id = ? AND date = ? AND is_active = 1 "
+                    "ORDER BY version DESC LIMIT 1",
+                    (user_id, date_str),
+                ).fetchone()
+                return json.loads(row["schedule_data"]) if row else None
+        except sqlite3.Error as e:
+            raise DatabaseError(f"get_schedule failed: {e}") from e
+
+    # ==========================================
+    # GOAL METHODS
+    # ==========================================
+
+    def create_goal(self, user_id: int, data: Dict) -> int:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO goals (user_id, title, description, category, priority, "
+                    "status, target_date, progress) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        data.get("title"),
+                        data.get("description"),
+                        data.get("category"),
+                        data.get("priority", 3),
+                        data.get("status", "active"),
+                        data.get("target_date"),
+                        data.get("progress", 0),
+                    ),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except sqlite3.IntegrityError as e:
+            raise DatabaseError(f"Invalid goal data: {e}") from e
+        except sqlite3.Error as e:
+            raise DatabaseError(f"create_goal failed: {e}") from e
+
+    def get_goals(self, user_id: int, status: Optional[str] = None) -> List[Dict]:
+        try:
+            with self.get_connection() as conn:
+                if status:
+                    rows = conn.execute(
+                        "SELECT * FROM goals WHERE user_id = ? AND status = ? "
+                        "ORDER BY priority DESC, created_at DESC",
+                        (user_id, status),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM goals WHERE user_id = ? ORDER BY priority DESC, created_at DESC",
+                        (user_id,),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            raise DatabaseError(f"get_goals failed: {e}") from e
+
+    def update_goal_progress(self, goal_id: int, progress: float):
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE goals SET progress = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (progress, goal_id),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise DatabaseError(f"Invalid progress value: {e}") from e
+        except sqlite3.Error as e:
+            raise DatabaseError(f"update_goal_progress failed: {e}") from e
+
+    # ==========================================
+    # HABIT METHODS
+    # ==========================================
+
+    def create_habit(self, user_id: int, data: Dict) -> int:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO habits (user_id, name, description, frequency, target_count) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        data.get("name"),
+                        data.get("description"),
+                        data.get("frequency", "daily"),
+                        data.get("target_count", 1),
+                    ),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except sqlite3.IntegrityError as e:
+            raise DatabaseError(f"Invalid habit data: {e}") from e
+        except sqlite3.Error as e:
+            raise DatabaseError(f"create_habit failed: {e}") from e
+
+    def get_habits(self, user_id: int, status: str = "active") -> List[Dict]:
+        try:
+            with self.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM habits WHERE user_id = ? AND status = ? ORDER BY created_at DESC",
+                    (user_id, status),
+                ).fetchall()
+                return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            raise DatabaseError(f"get_habits failed: {e}") from e
+
+    def log_habit(self, habit_id: int, date_str: str, completed: bool = True, notes: str = None):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                existing = cursor.execute(
+                    "SELECT id FROM habit_logs WHERE habit_id = ? AND date = ?",
+                    (habit_id, date_str),
+                ).fetchone()
+                if existing:
+                    cursor.execute(
+                        "UPDATE habit_logs SET completed = ?, notes = ? WHERE id = ?",
+                        (1 if completed else 0, notes, existing["id"]),
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO habit_logs (habit_id, date, completed, notes) VALUES (?, ?, ?, ?)",
+                        (habit_id, date_str, 1 if completed else 0, notes),
+                    )
+                conn.commit()
+            self._recalculate_streak(habit_id)
+        except sqlite3.Error as e:
+            raise DatabaseError(f"log_habit failed: {e}") from e
+
+    def _recalculate_streak(self, habit_id: int):
+        """
+        Walk backwards day-by-day from today (calendar-aware, unbounded by row count)
+        so streaks stay correct even with months of history or gaps in logging.
+        """
+        try:
+            with self.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT date, completed FROM habit_logs WHERE habit_id = ? ORDER BY date DESC",
+                    (habit_id,),
+                ).fetchall()
+                log_by_date = {r["date"]: bool(r["completed"]) for r in rows}
+
+                if not log_by_date:
+                    return
+
+                # Current streak: consecutive completed days ending today or yesterday
+                # (yesterday allowed so today's not-yet-logged day doesn't zero the streak)
+                current_streak = 0
+                cursor_date = date.today()
+                # if today has no log yet, start checking from yesterday
+                if cursor_date.isoformat() not in log_by_date:
+                    cursor_date -= timedelta(days=1)
+                while True:
+                    key = cursor_date.isoformat()
+                    if log_by_date.get(key) is True:
+                        current_streak += 1
+                        cursor_date -= timedelta(days=1)
+                    else:
+                        break
+
+                # Longest streak: scan full history for the longest consecutive run
+                sorted_dates = sorted(
+                    (date.fromisoformat(d) for d, done in log_by_date.items() if done)
+                )
+                longest = running = 0
+                prev = None
+                for d in sorted_dates:
+                    if prev is not None and (d - prev).days == 1:
+                        running += 1
+                    else:
+                        running = 1
+                    longest = max(longest, running)
+                    prev = d
+
+                conn.execute(
+                    "UPDATE habits SET current_streak = ?, longest_streak = MAX(longest_streak, ?), "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (current_streak, longest, habit_id),
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            raise DatabaseError(f"_recalculate_streak failed: {e}") from e
+
+    # ==========================================
+    # TASK HISTORY METHODS
+    # ==========================================
+
+    def log_task(self, user_id: int, data: Dict):
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO task_history (user_id, task_name, scheduled_time, actual_time, "
+                    "status, duration, date, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        data.get("task_name"),
+                        data.get("scheduled_time"),
+                        data.get("actual_time"),
+                        data.get("status"),
+                        data.get("duration"),
+                        data.get("date"),
+                        data.get("notes"),
+                    ),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise DatabaseError(f"Invalid task log data: {e}") from e
+        except sqlite3.Error as e:
+            raise DatabaseError(f"log_task failed: {e}") from e
+
+    def get_task_patterns(self, user_id: int, days: int = 30) -> Dict:
+        try:
+            with self.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM task_history WHERE user_id = ? AND date >= date('now', ?) "
+                    "ORDER BY created_at DESC",
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+                tasks = [dict(r) for r in rows]
+
+            patterns = {
+                "total": len(tasks),
+                "skipped": [],
+                "postponed": [],
+                "completion_rate": 0,
+                "avg_duration_minutes": 0,
+            }
+            if tasks:
+                completed = [t for t in tasks if t.get("status") == "completed"]
+                patterns["completion_rate"] = round((len(completed) / len(tasks)) * 100, 1)
+
+                durations = [t["duration"] for t in tasks if t.get("duration")]
+                patterns["avg_duration_minutes"] = (
+                    round(sum(durations) / len(durations), 1) if durations else 0
+                )
+
+                skipped_count, postponed_count = {}, {}
+                for t in tasks:
+                    if t.get("status") == "skipped":
+                        skipped_count[t["task_name"]] = skipped_count.get(t["task_name"], 0) + 1
+                    elif t.get("status") == "postponed":
+                        postponed_count[t["task_name"]] = postponed_count.get(t["task_name"], 0) + 1
+
+                patterns["skipped"] = sorted(skipped_count.items(), key=lambda x: x[1], reverse=True)[:5]
+                patterns["postponed"] = sorted(postponed_count.items(), key=lambda x: x[1], reverse=True)[:5]
+
+            return patterns
+        except sqlite3.Error as e:
+            raise DatabaseError(f"get_task_patterns failed: {e}") from e
+
+    def get_progress_analytics(self, user_id: int, days: int = 30) -> Dict:
+        """Extended analytics: task patterns + habit streaks, all in one call."""
+        patterns = self.get_task_patterns(user_id, days)
+        habits = self.get_habits(user_id, status="active")
+        habit_streaks = [
+            {"name": h["name"], "current_streak": h["current_streak"], "longest_streak": h["longest_streak"]}
+            for h in habits
+        ]
+        return {**patterns, "habit_streaks": habit_streaks}
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\models\__init__.py
+================================================================================
+# package
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\routes\dashboard.py
+================================================================================
+import logging
+import re
+from datetime import date, datetime
+from typing import Optional, List
+
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field, field_validator
+
+from app.models.database import Database, DatabaseError
+from app.services.llm_interface import LLMService
+from app.core.agent import FocusAgent
+from app.core.brain_interface import Brain
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api", tags=["dashboard"])
+
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+# ==========================================
+# Dependency wiring (overridden by main.py)
+# ==========================================
+def get_database() -> Database:
+    raise RuntimeError("Database dependency not configured")
+
+
+def get_llm_service() -> LLMService:
+    raise RuntimeError("LLM dependency not configured")
+
+
+def get_brain() -> Brain:
+    raise RuntimeError("Brain dependency not configured")
+
+
+def get_agent(
+    db: Database = Depends(get_database),
+    llm: LLMService = Depends(get_llm_service),
+    brain: Brain = Depends(get_brain),
+) -> FocusAgent:
+    return FocusAgent(db=db, llm=llm, brain=brain)
+
+
+# ==========================================
+# REQUEST / VALIDATION MODELS
+# ==========================================
+class MessageRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    user_id: str = Field(default="demo_user", min_length=1, max_length=100)
+    api_key: Optional[str] = Field(default=None, description="LLM API key from frontend")  # âœ… ADDED
+
+
+class TaskCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    start_time: Optional[str] = Field(default=None, description="HH:MM 24h format")
+    end_time: Optional[str] = None
+    duration: Optional[int] = Field(default=None, ge=0, le=1440)
+    priority: int = Field(default=3, ge=1, le=5)
+    category: str = Field(default="general", max_length=50)
+    status: str = Field(default="pending")
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def valid_time(cls, v):
+        if v and not _TIME_RE.match(v):
+            raise ValueError("must be HH:MM 24-hour format")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, v):
+        allowed = {"pending", "in_progress", "completed", "skipped", "postponed"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {allowed}")
+        return v
+
+
+class GoalCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=1000)
+    category: Optional[str] = Field(default=None, max_length=50)
+    priority: int = Field(default=3, ge=1, le=5)
+    status: str = Field(default="active")
+    target_date: Optional[str] = None
+    progress: float = Field(default=0, ge=0, le=100)
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, v):
+        allowed = {"active", "completed", "archived"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {allowed}")
+        return v
+
+
+class HabitCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=500)
+    frequency: str = Field(default="daily")
+    target_count: int = Field(default=1, ge=1, le=100)
+
+    @field_validator("frequency")
+    @classmethod
+    def valid_frequency(cls, v):
+        if v not in {"daily", "weekly"}:
+            raise ValueError("frequency must be 'daily' or 'weekly'")
+        return v
+
+
+class HabitLogRequest(BaseModel):
+    date: str
+    completed: bool = True
+    notes: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("date")
+    @classmethod
+    def valid_date(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("date must be ISO format YYYY-MM-DD")
+        return v
+
+
+class TaskLog(BaseModel):
+    task_name: str = Field(..., min_length=1, max_length=200)
+    scheduled_time: Optional[str] = None
+    actual_time: Optional[str] = None
+    status: str = Field(default="pending")
+    duration: Optional[int] = Field(default=None, ge=0, le=1440)
+    date: str
+    notes: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, v):
+        allowed = {"pending", "in_progress", "completed", "skipped", "postponed"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {allowed}")
+        return v
+
+    @field_validator("date")
+    @classmethod
+    def valid_date(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("date must be ISO format YYYY-MM-DD")
+        return v
+
+
+# ==========================================
+# Helper: convert DatabaseError -> HTTP 500 consistently
+# ==========================================
+def _run(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except DatabaseError as e:
+        logger.error(f"DB error: {e}")
+        raise HTTPException(status_code=500, detail="Database operation failed")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected server error")
+
+
+# ==========================================
+# AGENT CHAT - UPDATED with API key support
+# ==========================================
+@router.post("/agent/process")
+async def process_message(request: MessageRequest, agent: FocusAgent = Depends(get_agent)):
+    def _process():
+        # ðŸ”‘ Update LLM with API key from frontend
+        if request.api_key:
+            agent.llm.update_api_key(request.api_key)
+            logger.info(f"âœ… API key updated for user {request.user_id}")
+        elif not agent.llm.enabled:
+            logger.warning(f"âŒ No API key provided for user {request.user_id}")
+            return {
+                "success": False,
+                "error": "No API key provided",
+                "response": {
+                    "message": "ðŸ”‘ Please enter your LLM API key in the settings above to enable AI features.",
+                    "intent": "error",
+                }
+            }
+        
+        response = agent.process(request.user_id, request.message)
+        return {
+            "success": True,
+            "response": {
+                "message": response.message,
+                "intent": response.intent.value if response.intent else "unknown",
+                "schedule": response.schedule.to_dict() if response.schedule else None,
+                "suggestions": response.suggestions,
+                "reasoning": response.reasoning,
+                "vanguard_data": response.vanguard_data,
+            },
+        }
+    return _run(_process)
+
+
+# ==========================================
+# API KEY - REMOVED (now handled by frontend localStorage)
+# ==========================================
+# The following endpoints are no longer needed since API keys are
+# managed entirely in the frontend via localStorage.
+#
+# @router.post("/user/apikey")
+# async def save_api_key(req: ApiKeyRequest, db: Database = Depends(get_database)):
+#     def _save():
+#         db.get_or_create_user(req.user_id)
+#         db.save_api_key(req.user_id, req.api_key)
+#         return {"success": True}
+#     return _run(_save)
+#
+# @router.get("/user/apikey/status")
+# async def api_key_status(user_id: str = "demo_user", db: Database = Depends(get_database)):
+#     def _status():
+#         key = db.get_api_key(user_id)
+#         return {"success": True, "has_key": bool(key)}
+#     return _run(_status)
+
+
+# ==========================================
+# SCHEDULE
+# ==========================================
+@router.get("/schedule/{user_id}")
+async def get_schedule(user_id: str, target_date: Optional[str] = None, db: Database = Depends(get_database)):
+    def _get():
+        user = db.get_or_create_user(user_id)
+        d = target_date or date.today().isoformat()
+        schedule = db.get_schedule(user["id"], d)
+        return {"success": True, "date": d, "schedule": schedule or {"tasks": []}}
+    return _run(_get)
+
+
+@router.post("/schedule/{user_id}")
+async def add_task(user_id: str, task: TaskCreate, db: Database = Depends(get_database)):
+    def _add():
+        user = db.get_or_create_user(user_id)
+        today = date.today().isoformat()
+        updated = db.add_task_to_schedule(user["id"], today, task.model_dump())
+        return {"success": True, "task": task.model_dump(), "schedule": updated}
+    return _run(_add)
+
+
+# ==========================================
+# GOALS
+# ==========================================
+@router.get("/goals/{user_id}")
+async def get_goals(user_id: str, db: Database = Depends(get_database)):
+    def _get():
+        user = db.get_or_create_user(user_id)
+        return {"success": True, "goals": db.get_goals(user["id"])}
+    return _run(_get)
+
+
+@router.post("/goals/{user_id}")
+async def add_goal(user_id: str, goal: GoalCreate, db: Database = Depends(get_database)):
+    def _add():
+        user = db.get_or_create_user(user_id)
+        goal_id = db.create_goal(user["id"], goal.model_dump())
+        return {"success": True, "goal_id": goal_id, "goal": goal.model_dump()}
+    return _run(_add)
+
+
+# ==========================================
+# HABITS
+# ==========================================
+@router.get("/habits/{user_id}")
+async def get_habits(user_id: str, db: Database = Depends(get_database)):
+    def _get():
+        user = db.get_or_create_user(user_id)
+        return {"success": True, "habits": db.get_habits(user["id"])}
+    return _run(_get)
+
+
+@router.post("/habits/{user_id}")
+async def add_habit(user_id: str, habit: HabitCreate, db: Database = Depends(get_database)):
+    def _add():
+        user = db.get_or_create_user(user_id)
+        habit_id = db.create_habit(user["id"], habit.model_dump())
+        return {"success": True, "habit_id": habit_id, "habit": habit.model_dump()}
+    return _run(_add)
+
+
+@router.post("/habits/{habit_id}/log")
+async def log_habit(habit_id: int, log: HabitLogRequest, db: Database = Depends(get_database)):
+    def _log():
+        db.log_habit(habit_id, log.date, log.completed, log.notes)
+        return {"success": True}
+    return _run(_log)
+
+
+# ==========================================
+# PROGRESS / ANALYTICS (extended)
+# ==========================================
+@router.get("/progress/{user_id}")
+async def get_progress(user_id: str, days: int = 30, db: Database = Depends(get_database)):
+    def _get():
+        user = db.get_or_create_user(user_id)
+        analytics = db.get_progress_analytics(user["id"], days=days)
+        return {"success": True, **analytics}
+    return _run(_get)
+
+
+@router.post("/progress/{user_id}/log")
+async def log_task(user_id: str, log: TaskLog, db: Database = Depends(get_database)):
+    def _log():
+        user = db.get_or_create_user(user_id)
+        db.log_task(user["id"], log.model_dump())
+        return {"success": True, "log": log.model_dump()}
+    return _run(_log)
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\routes\__init__.py
+================================================================================
+# package
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\services\anthropic.py
+================================================================================
+import os
+import httpx
+import logging
+from typing import Optional
+
+from app.services.llm_interface import LLMService
+
+logger = logging.getLogger(__name__)
+
+
+class AnthropicService(LLMService):
+    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-5-sonnet-20241022"):
+        self.api_key = api_key or os.getenv("LLM_API_KEY", "")
+        self.base_url = "https://api.anthropic.com/v1/messages"
+        self.model = model
+        self._enabled = bool(self.api_key)
+
+    def update_api_key(self, api_key: str) -> None:
+        self.api_key = api_key
+        self._enabled = bool(api_key)
+        if self._enabled:
+            logger.info("ðŸ”‘ Anthropic API key updated successfully")
+        else:
+            logger.warning("âŒ Anthropic API key is empty or invalid")
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def generate(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        if not self.enabled:
+            logger.warning("âŒ Anthropic disabled - returning mock response")
+            return self._mock_response()
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    self.base_url,
+                    headers={
+                        "x-api-key": self.api_key,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": f"You are a helpful scheduling assistant. Return your response as a JSON object with a 'tasks' array. Each task should have 'name', 'start_time', 'end_time', 'duration', and 'status'. Include optional 'suggestions' and 'reasoning' fields.\n\nUser request: {prompt}"
+                            }
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result["content"][0]["text"]
+                    logger.info(f"âœ… Anthropic API call successful ({len(content)} chars)")
+                    return content
+                else:
+                    logger.error(f"âŒ Anthropic API error: {response.status_code}")
+                    logger.error(f"Response: {response.text[:200]}")
+                    return self._mock_response()
+
+        except httpx.TimeoutException:
+            logger.error("âŒ Anthropic API timeout")
+            return self._mock_response()
+        except Exception as e:
+            logger.error(f"âŒ Anthropic error: {e}")
+            return self._mock_response()
+
+    def _mock_response(self) -> str:
+        """Fallback mock response when API is unavailable - Returns VALID JSON!"""
+        return """{
+    "tasks": [
+        {
+            "name": "Morning routine",
+            "start_time": "07:00",
+            "end_time": "08:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Deep work session",
+            "start_time": "09:00",
+            "end_time": "12:00",
+            "duration": 180,
+            "status": "pending"
+        },
+        {
+            "name": "Lunch break",
+            "start_time": "12:00",
+            "end_time": "13:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Afternoon work",
+            "start_time": "13:00",
+            "end_time": "17:00",
+            "duration": 240,
+            "status": "pending"
+        },
+        {
+            "name": "Exercise",
+            "start_time": "18:00",
+            "end_time": "19:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Dinner",
+            "start_time": "19:00",
+            "end_time": "20:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Relax and wind down",
+            "start_time": "20:00",
+            "end_time": "22:00",
+            "duration": 120,
+            "status": "pending"
+        }
+    ],
+    "suggestions": [
+        "Break your work into 90-minute focus blocks",
+        "Take a 5-minute break every hour",
+        "Stay hydrated throughout the day"
+    ],
+    "reasoning": "Structured your day around a typical work schedule with focused work periods, breaks, and personal time."
+}"""
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\services\deepseek.py
+================================================================================
+import os
+import httpx
+import logging
+from typing import Optional
+
+from app.services.llm_interface import LLMService
+
+logger = logging.getLogger(__name__)
+
+
+class DeepSeekService(LLMService):
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("LLM_API_KEY", "")
+        self.base_url = "https://api.deepseek.com/v1"
+        self.model = "deepseek-chat"
+        self._enabled = bool(self.api_key)
+
+    def update_api_key(self, api_key: str) -> None:
+        self.api_key = api_key
+        self._enabled = bool(api_key)
+        # Log when API key is updated
+        if self._enabled:
+            logger.info("ðŸ”‘ DeepSeek API key updated successfully")
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def generate(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        if not self.enabled:
+            logger.warning("âŒ DeepSeek disabled - returning mock response")
+            return self._mock_response()
+        
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system", 
+                                "content": "You are a helpful scheduling assistant. Return your response as a JSON object with a 'tasks' array. Each task should have 'name', 'start_time', 'end_time', 'duration', and 'status'. Include optional 'suggestions' and 'reasoning' fields."
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                )
+                if response.status_code == 200:
+                    # Extract just the content from the response
+                    result = response.json()
+                    content = result["choices"][0]["message"]["content"]
+                    logger.info(f"âœ… DeepSeek API call successful ({len(content)} chars)")
+                    return content
+                else:
+                    logger.error(f"âŒ DeepSeek API error: {response.status_code}")
+                    logger.error(f"Response: {response.text[:200]}")
+                    return self._mock_response()
+        except Exception as e:
+            logger.error(f"âŒ DeepSeek error: {e}")
+            return self._mock_response()
+
+    def _mock_response(self) -> str:
+        """Fallback mock response when API is unavailable - Returns VALID JSON!"""
+        return """{
+    "tasks": [
+        {
+            "name": "Morning routine",
+            "start_time": "07:00",
+            "end_time": "08:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Deep work session",
+            "start_time": "09:00",
+            "end_time": "12:00",
+            "duration": 180,
+            "status": "pending"
+        },
+        {
+            "name": "Lunch break",
+            "start_time": "12:00",
+            "end_time": "13:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Afternoon work",
+            "start_time": "13:00",
+            "end_time": "17:00",
+            "duration": 240,
+            "status": "pending"
+        },
+        {
+            "name": "Exercise",
+            "start_time": "18:00",
+            "end_time": "19:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Dinner",
+            "start_time": "19:00",
+            "end_time": "20:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Relax and wind down",
+            "start_time": "20:00",
+            "end_time": "22:00",
+            "duration": 120,
+            "status": "pending"
+        }
+    ],
+    "suggestions": [
+        "Break your work into 90-minute focus blocks",
+        "Take a 5-minute break every hour",
+        "Stay hydrated throughout the day"
+    ],
+    "reasoning": "Structured your day around a typical work schedule with focused work periods, breaks, and personal time."
+}"""
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\services\llm_interface.py
+================================================================================
+from abc import ABC, abstractmethod
+
+
+class LLMService(ABC):
+    """Uniform interface so the agent can call any LLM provider interchangeably."""
+
+    @abstractmethod
+    def generate(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        ...
+
+    @abstractmethod
+    def update_api_key(self, api_key: str) -> None:
+        ...
+
+    @property
+    @abstractmethod
+    def enabled(self) -> bool:
+        ...
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\services\openai.py
+================================================================================
+import os
+import httpx
+import logging
+from typing import Optional
+
+from app.services.llm_interface import LLMService
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIService(LLMService):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
+        self.api_key = api_key or os.getenv("LLM_API_KEY", "")
+        self.base_url = "https://api.openai.com/v1"
+        self.model = model
+        self._enabled = bool(self.api_key)
+
+    def update_api_key(self, api_key: str) -> None:
+        self.api_key = api_key
+        self._enabled = bool(api_key)
+        if self._enabled:
+            logger.info("ðŸ”‘ OpenAI API key updated successfully")
+        else:
+            logger.warning("âŒ OpenAI API key is empty or invalid")
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def generate(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        if not self.enabled:
+            logger.warning("âŒ OpenAI disabled - returning mock response")
+            return self._mock_response()
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a helpful scheduling assistant. Return your response as a JSON object with a 'tasks' array. Each task should have 'name', 'start_time', 'end_time', 'duration', and 'status'. Include optional 'suggestions' and 'reasoning' fields."
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result["choices"][0]["message"]["content"]
+                    logger.info(f"âœ… OpenAI API call successful ({len(content)} chars)")
+                    return content
+                else:
+                    logger.error(f"âŒ OpenAI API error: {response.status_code}")
+                    logger.error(f"Response: {response.text[:200]}")
+                    return self._mock_response()
+
+        except httpx.TimeoutException:
+            logger.error("âŒ OpenAI API timeout")
+            return self._mock_response()
+        except Exception as e:
+            logger.error(f"âŒ OpenAI error: {e}")
+            return self._mock_response()
+
+    def _mock_response(self) -> str:
+        """Fallback mock response when API is unavailable - Returns VALID JSON!"""
+        return """{
+    "tasks": [
+        {
+            "name": "Morning routine",
+            "start_time": "07:00",
+            "end_time": "08:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Deep work session",
+            "start_time": "09:00",
+            "end_time": "12:00",
+            "duration": 180,
+            "status": "pending"
+        },
+        {
+            "name": "Lunch break",
+            "start_time": "12:00",
+            "end_time": "13:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Afternoon work",
+            "start_time": "13:00",
+            "end_time": "17:00",
+            "duration": 240,
+            "status": "pending"
+        },
+        {
+            "name": "Exercise",
+            "start_time": "18:00",
+            "end_time": "19:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Dinner",
+            "start_time": "19:00",
+            "end_time": "20:00",
+            "duration": 60,
+            "status": "pending"
+        },
+        {
+            "name": "Relax and wind down",
+            "start_time": "20:00",
+            "end_time": "22:00",
+            "duration": 120,
+            "status": "pending"
+        }
+    ],
+    "suggestions": [
+        "Break your work into 90-minute focus blocks",
+        "Take a 5-minute break every hour",
+        "Stay hydrated throughout the day"
+    ],
+    "reasoning": "Structured your day around a typical work schedule with focused work periods, breaks, and personal time."
+}"""
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\services\__init__.py
+================================================================================
+# package
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\main.py
+================================================================================
+import os
+import time
+import logging
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO if os.getenv("ENVIRONMENT") == "production" else logging.DEBUG,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("focus_agent")
+
+from app.models.database import Database
+from app.services.llm_interface import LLMService
+from app.services.deepseek import DeepSeekService
+from app.services.openai import OpenAIService
+from app.services.anthropic import AnthropicService
+from app.core.vanguard_brain import VanguardBrain
+from app.core.brain_interface import Brain
+from app.routes import dashboard
+
+# ==========================================
+# CONFIG FROM ENV
+# ==========================================
+DB_PATH = os.getenv("DB_PATH", "focus_agent.db")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").lower()
+# REMOVED: LLM_API_KEY - now comes from frontend
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
+origins = ["*"] if CORS_ORIGINS.strip() == "*" else [o.strip() for o in CORS_ORIGINS.split(",")]
+
+# ==========================================
+# SINGLETONS (shared across requests)
+# ==========================================
+_db_instance = Database(db_path=DB_PATH)
+
+_llm_map = {"openai": OpenAIService, "anthropic": AnthropicService, "deepseek": DeepSeekService}
+_llm_instance: LLMService = _llm_map.get(LLM_PROVIDER, DeepSeekService)(None)  # ? No API key
+
+_brain_instance: Brain = VanguardBrain(llm=_llm_instance)
+
+
+def get_database() -> Database:
+    return _db_instance
+
+
+def get_llm_service() -> LLMService:
+    return _llm_instance
+
+
+def get_brain() -> Brain:
+    return _brain_instance
+
+
+# ==========================================
+# APP
+# ==========================================
+app = FastAPI(
+    title="Focus Agent API",
+    description="AI-powered adaptive scheduling agent with Vanguard Brain",
+    version="0.3.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    logger.info(f"{request.method} {request.url.path} -> {response.status_code} ({duration_ms:.1f}ms)")
+    return response
+
+
+# Wire the dashboard router's placeholder deps to real singletons
+app.dependency_overrides[dashboard.get_database] = get_database
+app.dependency_overrides[dashboard.get_llm_service] = get_llm_service
+app.dependency_overrides[dashboard.get_brain] = get_brain
+
+app.include_router(dashboard.router)
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "ðŸŽ¯ Focus Agent API",
+        "status": "running",
+        "version": "0.3.0",
+        "features": ["Vanguard Brain", "Adaptive Scheduling", "Goal Tracking", "Habit Tracking"],
+    }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+@app.get("/api/status")
+async def api_status(
+    db: Database = Depends(get_database),
+    llm: LLMService = Depends(get_llm_service),
+    brain: Brain = Depends(get_brain),
+):
+    return {
+        "status": "online",
+        "services": {
+            "database": f"connected ({DB_PATH})",
+            "llm_provider": llm.__class__.__name__,
+            "llm_enabled": llm.enabled,
+            "vanguard_brain": "active",
+        },
+    }
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\app\__init__.py
+================================================================================
+# package
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\run_server.py
+================================================================================
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    reload = os.getenv("ENVIRONMENT", "development") != "production"
+
+    print("=" * 60)
+    print("ðŸš€ FOCUS AGENT WITH VANGUARD BRAIN")
+    print("=" * 60)
+    print(f"ðŸ“ API:      http://localhost:{port}")
+    print(f"ðŸ“ API Docs: http://localhost:{port}/docs")
+    print(f"ðŸ“ Health:   http://localhost:{port}/health")
+    print("=" * 60)
+
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=reload)
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\backend\__init__.py
+================================================================================
+# package
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\frontend\css\style.css
+================================================================================
+/* ========================================== GLOBAL ========================================== */
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #0a0a0f;
+  color: #e0e0f0;
+}
+h1, h2, h3 { margin: 0; font-weight: 600; }
+button { cursor: pointer; border: none; background: none; color: inherit; font: inherit; }
+
+/* ========================================== HEADER ========================================== */
+.header {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #12121a; padding: 12px 20px; border-bottom: 1px solid #2a2a3a;
+}
+.header-left { display: flex; align-items: center; gap: 10px; }
+.logo { font-size: 1.5em; }
+.badge { background: #667eea; color: #fff; padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+.header-actions { display: flex; gap: 8px; }
+.header-btn { background: #1a1a2a; border-radius: 6px; padding: 6px 10px; font-size: 14px; }
+
+/* ========================================== STATUS BAR ========================================== */
+.status-bar {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #0f0f15; padding: 8px 16px; border-bottom: 1px solid #2a2a3a; font-size: 14px;
+}
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.status-dot.online { background: #55dd88; }
+.status-dot.offline { background: #ff6677; }
+.status-dot.processing { background: #ffaa44; }
+
+/* ========================================== API SECTION ========================================== */
+.api-section { padding: 12px 16px; background: #12121a; border-bottom: 1px solid #2a2a3a; }
+.api-row { display: flex; gap: 8px; }
+.api-row input { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #2a2a3a; background: #0a0a15; color: #e0e0f0; }
+.api-status { margin-top: 8px; font-size: 13px; }
+.api-status.ready { color: #55dd88; }
+.api-status.error { color: #ff6677; }
+
+/* ========================================== DASHBOARD SECTIONS ========================================== */
+.section { background: #12121a; border-radius: 16px; padding: 20px; margin: 16px; border: 1px solid #2a2a3a; }
+.section h2 { color: #8888aa; margin-bottom: 12px; font-size: 16px; font-weight: 600; }
+.empty-hint { color: #555577; text-align: center; padding: 20px; }
+
+.task-item, .goal-item, .habit-item {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #1a1a2a;
+}
+.task-item:last-child, .goal-item:last-child, .habit-item:last-child { border-bottom: none; }
+
+.task-time { color: #667eea; font-weight: 600; min-width: 80px; }
+.task-status { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.status-pending { background: #2a2a3a; color: #8888aa; }
+.status-completed { background: #1a3a2a; color: #55dd88; }
+.status-in_progress { background: #3a2a1a; color: #ffaa44; }
+.status-skipped { background: #3a1a1a; color: #ff6677; }
+.status-postponed { background: #2a2a1a; color: #ddbb55; }
+
+.goal-progress { flex: 1; height: 8px; background: #1a1a2a; border-radius: 10px; overflow: hidden; }
+.goal-progress-bar { height: 100%; background: linear-gradient(90deg, #667eea, #764ba2); border-radius: 10px; transition: width 0.5s; }
+.goal-percent { min-width: 50px; text-align: right; color: #8888aa; }
+.habit-streak { color: #ffaa44; font-weight: 600; }
+
+.vanguard-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 0; }
+.stat-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: #0a0a15; border-radius: 8px; border: 1px solid #1a1a2a;
+}
+.stat-label { color: #8888aa; font-size: 13px; }
+.stat-value { color: #667eea; font-weight: 600; font-size: 14px; }
+
+/* ---- Forms ---- */
+.section form {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; padding: 12px;
+  background: #0a0a15; border-radius: 10px; border: 1px solid #1a1a2a; align-items: center;
+}
+.section form input, .section form select {
+  flex: 1; min-width: 120px; padding: 8px 12px; background: #1a1a2a;
+  border: 1px solid #2a2a3a; border-radius: 8px; color: #ddd; font-size: 13px;
+  outline: none; transition: border-color 0.2s;
+}
+.section form input:focus, .section form select:focus { border-color: #667eea; }
+.section form input::placeholder { color: #555577; }
+
+/* ---- Buttons with spinner state ---- */
+.section form button, #saveApiBtn {
+  padding: 8px 16px; background: #667eea; border-radius: 8px; color: white;
+  font-weight: 600; font-size: 13px; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  transition: background 0.2s, transform 0.1s;
+}
+.section form button:hover, #saveApiBtn:hover { background: #5a6fd6; }
+.section form button:active, #saveApiBtn:active { transform: scale(0.97); }
+.section form button:disabled, #saveApiBtn:disabled { opacity: 0.65; cursor: not-allowed; transform: none; }
+
+.btn-spinner {
+  display: none; width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+  animation: spin 0.7s linear infinite;
+}
+button.loading .btn-label { opacity: 0.6; }
+button.loading .btn-spinner { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Fade-out feedback ---- */
+.form-msg {
+  display: inline-block; margin-left: 10px; font-size: 13px; font-weight: 600;
+  flex: 0 0 100%; text-align: center; opacity: 0; transition: opacity 0.4s ease;
+}
+.form-msg.visible { opacity: 1; }
+.form-msg.success { color: #55dd88; }
+.form-msg.error { color: #ff6677; }
+
+@media (max-width: 480px) {
+  .section form { flex-direction: column; }
+  .section form input, .section form select { min-width: auto; width: 100%; }
+  .section form button { width: 100%; }
+  .form-msg { margin-left: 0; margin-top: 5px; }
+}
+
+/* ========================================== CHAT AREA ========================================== */
+.chat-area { display: flex; flex-direction: column; height: 40vh; border-top: 1px solid #2a2a3a; }
+.messages { flex: 1; overflow-y: auto; padding: 16px; }
+.message { display: flex; gap: 10px; margin-bottom: 12px; }
+.message .avatar { font-size: 1.2em; }
+.message .bubble { background: #1a1a2a; padding: 10px 14px; border-radius: 12px; max-width: 70%; position: relative; }
+.message.user .bubble { background: #2a2a3a; }
+.message.agent .bubble { background: #0f0f15; }
+.message .time { display: block; font-size: 11px; color: #8888aa; margin-top: 4px; text-align: right; }
+
+.empty-state { text-align: center; padding: 30px 16px; color: #8888aa; }
+.empty-state .icon { font-size: 2em; margin-bottom: 8px; }
+.empty-state.hidden { display: none; }
+
+.quick-actions { display: flex; gap: 8px; padding: 8px; background: #12121a; border-top: 1px solid #2a2a3a; }
+.quick-action { flex: 1; background: #1a1a2a; border-radius: 6px; padding: 8px; font-size: 13px; }
+.quick-action.emergency { background: #3a1a1a; color: #ff6677; }
+
+.input-bar { display: flex; padding: 8px; background: #12121a; border-top: 1px solid #2a2a3a; }
+.input-bar textarea { flex: 1; resize: none; border: none; border-radius: 6px; padding: 8px; background: #0a0a15; color: #e0e0f0; }
+.send-btn { margin-left: 8px; background: #667eea; color: #fff; border-radius: 6px; padding: 0 16px; display: flex; align-items: center; justify-content: center; position: relative; }
+.send-icon { font-size: 16px; }
+.send-btn .spinner {
+  display: none; width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff; animation: spin 0.7s linear infinite;
+}
+.send-btn.loading .send-icon { display: none; }
+.send-btn.loading .spinner { display: inline-block; }
+
+/* ========================================== FOOTER ========================================== */
+.footer { text-align: center; padding: 12px; font-size: 13px; color: #8888aa; border-top: 1px solid #2a2a3a; }
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\frontend\js\agent.js
+================================================================================
+// ==========================================
+// API CLIENT
+// ==========================================
+class FocusAgentClient {
+  constructor(apiBase, userId) {
+    this.apiBase = apiBase;
+    this.userId = userId;
+  }
+
+  async _request(path, options = {}) {
+    const res = await fetch(`${this.apiBase}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error(`Server returned an invalid response (${res.status})`);
+    }
+    if (!res.ok) {
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map(d => d.msg).join(', ')
+        : (data.detail || data.error || `Request failed (${res.status})`);
+      throw new Error(detail);
+    }
+    return data;
+  }
+
+  // âœ… FIXED: Accepts API key parameter
+  chat(message, apiKey) {
+    return this._request('/agent/process', {
+      method: 'POST',
+      body: JSON.stringify({ 
+        message, 
+        user_id: this.userId,
+        api_key: apiKey || null
+      }),
+    });
+  }
+
+  getSchedule() {
+    return this._request(`/schedule/${this.userId}`);
+  }
+
+  createTask(task) {
+    return this._request(`/schedule/${this.userId}`, { method: 'POST', body: JSON.stringify(task) });
+  }
+
+  getGoals() {
+    return this._request(`/goals/${this.userId}`);
+  }
+
+  createGoal(goal) {
+    return this._request(`/goals/${this.userId}`, { method: 'POST', body: JSON.stringify(goal) });
+  }
+
+  getHabits() {
+    return this._request(`/habits/${this.userId}`);
+  }
+
+  createHabit(habit) {
+    return this._request(`/habits/${this.userId}`, { method: 'POST', body: JSON.stringify(habit) });
+  }
+
+  logHabit(habitId, date, completed = true) {
+    return this._request(`/habits/${habitId}/log`, {
+      method: 'POST',
+      body: JSON.stringify({ date, completed }),
+    });
+  }
+
+  getProgress() {
+    return this._request(`/progress/${this.userId}`);
+  }
+
+  logTask(log) {
+    return this._request(`/progress/${this.userId}/log`, { method: 'POST', body: JSON.stringify(log) });
+  }
+
+  // REMOVED: saveApiKey() - now handled entirely in localStorage by app.js
+  // The app.js saveApiKey() function now only uses localStorage
+}
+
+// ==========================================
+// NATURAL LANGUAGE COMMAND ROUTER
+// ==========================================
+const NL_PATTERNS = {
+  task: /^add\s+(?:a\s+)?(?:task\s+)?(.+?)\s+(?:at|@)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i,
+  goal: /^add\s+goal\s+(.+)$/i,
+  habit: /^(?:add|start)\s+habit\s+(.+)$/i,
+};
+
+function _to24h(hour, minute, meridiem) {
+  let h = parseInt(hour, 10);
+  const m = minute !== undefined && minute !== null ? parseInt(minute, 10) : 0;
+  if (isNaN(m)) {
+    return `${String(h).padStart(2, '0')}:00`;
+  }
+  if (meridiem) {
+    const mer = meridiem.toLowerCase();
+    if (mer === 'pm' && h < 12) h += 12;
+    if (mer === 'am' && h === 12) h = 0;
+  }
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function parseNaturalLanguageCommand(text, client) {
+  const taskMatch = text.match(NL_PATTERNS.task);
+  if (taskMatch) {
+    const [, name, hour, minute, meridiem] = taskMatch;
+    const start_time = _to24h(hour, minute, meridiem);
+    const payload = { name: name.trim(), start_time, status: 'pending' };
+    return { handled: true, kind: 'task', payload, promise: client.createTask(payload) };
+  }
+
+  const goalMatch = text.match(NL_PATTERNS.goal);
+  if (goalMatch) {
+    const payload = { title: goalMatch[1].trim() };
+    return { handled: true, kind: 'goal', payload, promise: client.createGoal(payload) };
+  }
+
+  const habitMatch = text.match(NL_PATTERNS.habit);
+  if (habitMatch) {
+    const payload = { name: habitMatch[1].trim(), frequency: 'daily' };
+    return { handled: true, kind: 'habit', payload, promise: client.createHabit(payload) };
+  }
+
+  return { handled: false };
+}
+
+window.FocusAgentClient = FocusAgentClient;
+window.parseNaturalLanguageCommand = parseNaturalLanguageCommand;
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\frontend\js\app.js
+================================================================================
+// ==========================================
+// STATE
+// ==========================================
+const state = {
+  apiKey: localStorage.getItem('focus_api_key') || '',
+  messages: JSON.parse(localStorage.getItem('focus_messages') || '[]'),
+  isProcessing: false,
+  taskCount: 0,
+  userId: localStorage.getItem('focus_user_id') || 'demo_user',
+};
+localStorage.setItem('focus_user_id', state.userId);
+
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:8000/api'
+  : '/api';
+
+const client = new FocusAgentClient(API_BASE, state.userId);
+
+// ==========================================
+// DOM REFS
+// ==========================================
+const $ = id => document.getElementById(id);
+const els = {
+  messages: $('messages'),
+  emptyState: $('emptyState'),
+  userInput: $('userInput'),
+  sendBtn: $('sendBtn'),
+  apiKeyInput: $('apiKeyInput'),
+  saveApiBtn: $('saveApiBtn'),
+  apiStatus: $('apiStatus'),
+  statusDot: $('statusDot'),
+  statusText: $('statusText'),
+  taskCount: $('taskCount'),
+  clearBtn: $('clearBtn'),
+  installBtn: $('installBtn'),
+  scheduleList: $('scheduleList'),
+  goalsList: $('goalsList'),
+  habitsList: $('habitsList'),
+  progressStats: $('progressStats'),
+};
+
+// ==========================================
+// CENTRALIZED ERROR / FEEDBACK HELPERS
+// ==========================================
+/** Show a fading success/error message inside a form. Auto-clears after `ms`. */
+function showFormMessage(el, text, type = 'success', ms = 3000) {
+  el.textContent = text;
+  el.className = `form-msg ${type}`;
+  // force reflow so the opacity transition re-triggers on repeated messages
+  void el.offsetWidth;
+  el.classList.add('visible');
+  clearTimeout(el._fadeTimer);
+  el._fadeTimer = setTimeout(() => {
+    el.classList.remove('visible');
+  }, ms);
+}
+
+/** Toggle a button's loading state (spinner + disabled) consistently everywhere. */
+function setButtonLoading(btn, loading) {
+  btn.disabled = loading;
+  btn.classList.toggle('loading', loading);
+}
+
+/** One place that turns any thrown error into user-facing text + console log. */
+function reportError(context, error) {
+  console.error(`[${context}]`, error);
+  return error && error.message ? error.message : 'Something went wrong. Please try again.';
+}
+
+// ==========================================
+// INIT
+// ==========================================
+function init() {
+  if (state.apiKey) {
+    els.apiKeyInput.value = state.apiKey;
+    els.apiStatus.textContent = 'âœ… API key loaded';
+    els.apiStatus.className = 'api-status ready';
+  }
+
+  if (state.messages.length > 0) {
+    els.emptyState.classList.add('hidden');
+    state.messages.forEach(renderMessage);
+  }
+
+  setupEventListeners();
+  setupAutoResize();
+  checkApiHealth();
+  loadDashboardData();
+}
+
+async function checkApiHealth() {
+  try {
+    const base = API_BASE.replace(/\/api$/, '');
+    const response = await fetch(`${base}/health`);
+    setStatus(response.ok ? 'online' : 'offline', response.ok ? 'Connected' : 'API Error');
+  } catch {
+    setStatus('offline', 'API Offline');
+  }
+}
+
+// ==========================================
+// DASHBOARD DATA
+// ==========================================
+async function loadDashboardData() {
+  const results = await Promise.allSettled([
+    client.getSchedule(),
+    client.getGoals(),
+    client.getHabits(),
+    client.getProgress(),
+  ]);
+
+  const [scheduleR, goalsR, habitsR, progressR] = results;
+
+  if (scheduleR.status === 'fulfilled') renderSchedule(scheduleR.value.schedule);
+  else reportError('loadSchedule', scheduleR.reason);
+
+  if (goalsR.status === 'fulfilled') renderGoals(goalsR.value.goals);
+  else reportError('loadGoals', goalsR.reason);
+
+  if (habitsR.status === 'fulfilled') renderHabits(habitsR.value.habits);
+  else reportError('loadHabits', habitsR.reason);
+
+  if (progressR.status === 'fulfilled') renderProgress(progressR.value);
+  else reportError('loadProgress', progressR.reason);
+}
+
+// ==========================================
+// EVENT LISTENERS
+// ==========================================
+function setupEventListeners() {
+  els.sendBtn.addEventListener('click', handleSend);
+  els.userInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  });
+
+  els.saveApiBtn.addEventListener('click', saveApiKey);
+  els.apiKeyInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') saveApiKey();
+  });
+
+  document.querySelectorAll('.quick-action').forEach(btn => {
+    btn.addEventListener('click', () => {
+      els.userInput.value = btn.dataset.text;
+      handleSend();
+    });
+  });
+
+  els.clearBtn.addEventListener('click', clearChat);
+  els.installBtn.addEventListener('click', installPWA);
+
+  document.getElementById('taskForm').addEventListener('submit', handleTaskForm);
+  document.getElementById('goalForm').addEventListener('submit', handleGoalForm);
+  document.getElementById('habitForm').addEventListener('submit', handleHabitForm);
+}
+
+// ==========================================
+// SEND MESSAGE (chat + NL command routing)
+// ==========================================
+async function handleSend() {
+  const text = els.userInput.value.trim();
+  if (!text || state.isProcessing) return;
+
+  els.userInput.value = '';
+  els.emptyState.classList.add('hidden');
+  addMessage('user', text);
+
+  state.isProcessing = true;
+  setButtonLoading(els.sendBtn, true);
+  setStatus('processing', 'Processing...');
+
+  try {
+    // Try structured "add task/goal/habit at ..." commands first so simple
+    // requests don't need a round trip through the LLM.
+    const nl = parseNaturalLanguageCommand(text, client);
+    if (nl.handled) {
+      await nl.promise;
+      addMessage('agent', `âœ… Added ${nl.kind}: "${nl.payload.name || nl.payload.title}"`);
+      loadDashboardData();
+    } else {
+      const { response } = await client.chat(text, state.apiKey);
+      addMessage('agent', response.message);
+      if (response.schedule) loadDashboardData();
+      if (response.suggestions?.length) addMessage('agent', 'ðŸ’¡ ' + response.suggestions.join('\n'));
+    }
+  } catch (error) {
+    addMessage('agent', 'âŒ ' + reportError('handleSend', error));
+  } finally {
+    state.isProcessing = false;
+    setButtonLoading(els.sendBtn, false);
+    setStatus('online', 'Ready');
+  }
+}
+
+// ==========================================
+// FORM HANDLERS (spinner + fade feedback)
+// ==========================================
+async function handleTaskForm(e) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button');
+  const msg = document.getElementById('taskMsg');
+  const name = document.getElementById('taskName').value.trim();
+  const start_time = document.getElementById('taskTime').value || undefined;
+
+  setButtonLoading(btn, true);
+  try {
+    await client.createTask({ name, start_time, status: 'pending' });
+    showFormMessage(msg, 'âœ… Task added!', 'success');
+    e.target.reset();
+    loadDashboardData();
+  } catch (err) {
+    showFormMessage(msg, 'âŒ ' + reportError('createTask', err), 'error', 5000);
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function handleGoalForm(e) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button');
+  const msg = document.getElementById('goalMsg');
+  const title = document.getElementById('goalTitle').value.trim();
+  const category = document.getElementById('goalCategory').value.trim() || undefined;
+
+  setButtonLoading(btn, true);
+  try {
+    await client.createGoal({ title, category });
+    showFormMessage(msg, 'âœ… Goal added!', 'success');
+    e.target.reset();
+    loadDashboardData();
+  } catch (err) {
+    showFormMessage(msg, 'âŒ ' + reportError('createGoal', err), 'error', 5000);
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function handleHabitForm(e) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button');
+  const msg = document.getElementById('habitMsg');
+  const name = document.getElementById('habitName').value.trim();
+  const frequency = document.getElementById('habitFrequency').value;
+
+  setButtonLoading(btn, true);
+  try {
+    await client.createHabit({ name, frequency });
+    showFormMessage(msg, 'âœ… Habit added!', 'success');
+    e.target.reset();
+    loadDashboardData();
+  } catch (err) {
+    showFormMessage(msg, 'âŒ ' + reportError('createHabit', err), 'error', 5000);
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function saveApiKey() {
+  const key = els.apiKeyInput.value.trim();
+  if (!key) {
+    els.apiStatus.textContent = 'âš ï¸ Please enter a valid API key';
+    els.apiStatus.className = 'api-status error';
+    return;
+  }
+  setButtonLoading(els.saveApiBtn, true);
+  try {
+    // REMOVED: saveApiKey() - now localStorage only;
+    state.apiKey = key;
+    localStorage.setItem('focus_api_key', key);
+    els.apiStatus.textContent = 'âœ… API key saved!';
+    els.apiStatus.className = 'api-status ready';
+  } catch (err) {
+    els.apiStatus.textContent = 'âŒ ' + reportError('saveApiKey', err);
+    els.apiStatus.className = 'api-status error';
+  } finally {
+    setButtonLoading(els.saveApiBtn, false);
+  }
+}
+
+// ==========================================
+// RENDERING
+// ==========================================
+function renderSchedule(schedule) {
+  const tasks = schedule?.tasks || [];
+  state.taskCount = tasks.length;
+  els.taskCount.textContent = state.taskCount;
+
+  if (!tasks.length) {
+    els.scheduleList.innerHTML = '<div class="empty-hint">No tasks scheduled. Create one!</div>';
+    return;
+  }
+  els.scheduleList.innerHTML = tasks.map(t => `
+    <div class="task-item">
+      <span class="task-time">${t.start_time || '--:--'}</span>
+      <span class="task-name">${escapeHtml(t.name)}</span>
+      <span class="task-status status-${t.status}">${t.status}</span>
+    </div>`).join('');
+}
+
+function renderGoals(goals) {
+  if (!goals?.length) {
+    els.goalsList.innerHTML = '<div class="empty-hint">No goals set. Add your first goal!</div>';
+    return;
+  }
+  els.goalsList.innerHTML = goals.map(g => `
+    <div class="goal-item">
+      <span class="goal-name">${escapeHtml(g.title)}</span>
+      <div class="goal-progress"><div class="goal-progress-bar" style="width:${g.progress}%"></div></div>
+      <span class="goal-percent">${g.progress}%</span>
+    </div>`).join('');
+}
+
+function renderHabits(habits) {
+  if (!habits?.length) {
+    els.habitsList.innerHTML = '<div class="empty-hint">No habits tracked. Start a habit today!</div>';
+    return;
+  }
+  els.habitsList.innerHTML = habits.map(h => `
+    <div class="habit-item">
+      <span class="habit-name">${escapeHtml(h.name)}</span>
+      <span class="habit-streak">ðŸ”¥ ${h.current_streak} day streak</span>
+    </div>`).join('');
+}
+
+function renderProgress(progress) {
+  const stats = [
+    { label: 'Completion rate', value: `${progress.completion_rate ?? 0}%` },
+    { label: 'Avg task duration', value: `${progress.avg_duration_minutes ?? 0} min` },
+    { label: 'Tasks logged', value: progress.total ?? 0 },
+  ];
+  (progress.habit_streaks || []).forEach(h => {
+    stats.push({ label: `${h.name} streak`, value: `${h.current_streak}d (best ${h.longest_streak}d)` });
+  });
+
+  els.progressStats.innerHTML = stats.map(s => `
+    <div class="stat-item">
+      <span class="stat-label">${escapeHtml(s.label)}</span>
+      <span class="stat-value">${escapeHtml(String(s.value))}</span>
+    </div>`).join('');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str ?? '';
+  return div.innerHTML;
+}
+
+// ==========================================
+// CHAT UI HELPERS
+// ==========================================
+function addMessage(type, content) {
+  const msg = { type, content, timestamp: new Date().toISOString() };
+  state.messages.push(msg);
+  localStorage.setItem('focus_messages', JSON.stringify(state.messages));
+  renderMessage(msg);
+}
+
+function renderMessage(msg) {
+  const div = document.createElement('div');
+  div.className = `message ${msg.type}`;
+  const avatar = msg.type === 'user' ? 'ðŸ‘¤' : 'ðŸ¤–';
+  div.innerHTML = `
+    <div class="avatar">${avatar}</div>
+    <div class="bubble">${formatContent(msg.content)}<span class="time">${formatTime(msg.timestamp)}</span></div>`;
+  els.messages.appendChild(div);
+  els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+function formatContent(content) {
+  return escapeHtml(content).replace(/\n/g, '<br>');
+}
+
+function formatTime(iso) {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function setStatus(status, text) {
+  els.statusDot.className = `status-dot ${status}`;
+  els.statusText.textContent = text;
+}
+
+function clearChat() {
+  if (confirm('Clear all messages?')) {
+    state.messages = [];
+    localStorage.setItem('focus_messages', '[]');
+    els.messages.innerHTML = '';
+    els.emptyState.classList.remove('hidden');
+  }
+}
+
+function setupAutoResize() {
+  els.userInput.addEventListener('input', () => {
+    els.userInput.style.height = 'auto';
+    els.userInput.style.height = Math.min(els.userInput.scrollHeight, 100) + 'px';
+  });
+}
+
+// ==========================================
+// PWA INSTALL
+// ==========================================
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+  els.installBtn.style.display = 'block';
+});
+
+async function installPWA() {
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    els.installBtn.style.display = 'none';
+  } else {
+    alert('ðŸ“± To install:\nâ€¢ Chrome: Menu â†’ "Add to Home Screen"\nâ€¢ Safari: Share â†’ "Add to Home Screen"');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\frontend\index.html
+================================================================================
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>ðŸŽ¯ Focus Agent</title>
+
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
+  <link rel="apple-touch-icon" href="/icons/icon-512.png" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+
+    <header class="header">
+      <div class="header-left">
+        <span class="logo">ðŸŽ¯</span>
+        <h1>Focus Agent</h1>
+        <span class="badge">v2</span>
+      </div>
+      <div class="header-actions">
+        <button class="header-btn" id="clearBtn" title="Clear chat">âœ•</button>
+        <button class="header-btn" id="installBtn">ðŸ“±</button>
+      </div>
+    </header>
+
+    <div class="status-bar">
+      <div class="status-indicator">
+        <span class="status-dot online" id="statusDot"></span>
+        <span id="statusText">Ready</span>
+      </div>
+      <div class="task-count">ðŸ“‹ <span id="taskCount">0</span> tasks</div>
+    </div>
+
+    <div class="api-section" id="apiSection">
+      <div class="api-row">
+        <input type="password" id="apiKeyInput" placeholder="sk-... enter LLM API key" />
+        <button id="saveApiBtn"><span class="btn-label">Save Key</span><span class="btn-spinner"></span></button>
+      </div>
+      <div class="api-status" id="apiStatus">ðŸ”‘ Enter your API key to enable AI scheduling (optional)</div>
+    </div>
+
+    <div id="dashboard">
+      <div class="section">
+        <h2>ðŸ“… Today's Schedule</h2>
+        <form id="taskForm">
+          <input type="text" id="taskName" placeholder="Task name" required maxlength="200" />
+          <input type="time" id="taskTime" />
+          <button type="submit"><span class="btn-label">âž• Add Task</span><span class="btn-spinner"></span></button>
+          <span id="taskMsg" class="form-msg"></span>
+        </form>
+        <div id="scheduleList">
+          <div class="empty-hint">No tasks scheduled. Create one!</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>ðŸŽ¯ Active Goals</h2>
+        <form id="goalForm">
+          <input type="text" id="goalTitle" placeholder="Goal title" required maxlength="200" />
+          <input type="text" id="goalCategory" placeholder="Category" maxlength="50" />
+          <button type="submit"><span class="btn-label">âž• Add Goal</span><span class="btn-spinner"></span></button>
+          <span id="goalMsg" class="form-msg"></span>
+        </form>
+        <div id="goalsList">
+          <div class="empty-hint">No goals set. Add your first goal!</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>ðŸ”¥ Habits & Streaks</h2>
+        <form id="habitForm">
+          <input type="text" id="habitName" placeholder="Habit name" required maxlength="200" />
+          <select id="habitFrequency">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <button type="submit"><span class="btn-label">âž• Add Habit</span><span class="btn-spinner"></span></button>
+          <span id="habitMsg" class="form-msg"></span>
+        </form>
+        <div id="habitsList">
+          <div class="empty-hint">No habits tracked. Start a habit today!</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>ðŸ“ˆ Progress</h2>
+        <div id="progressStats" class="vanguard-stats">
+          <div class="empty-hint">No progress data yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-area">
+      <div class="messages" id="messages">
+        <div class="empty-state" id="emptyState">
+          <div class="icon">ðŸ§ </div>
+          <h3>Your AI Scheduling Agent</h3>
+          <p>Tell me your schedule, and I'll adapt when things change.<br />
+          Try: <em>"Add deep work block at 10am"</em> or <em>"I completed 25 minutes of work"</em></p>
+        </div>
+      </div>
+
+      <div class="quick-actions">
+        <button class="quick-action" data-text="I completed 15 minutes of work">âœ… Log Win</button>
+        <button class="quick-action emergency" data-text="I skipped today because of work">â° Log Skip</button>
+        <button class="quick-action" data-text="Show my progress">ðŸ“Š Progress</button>
+        <button class="quick-action" data-text="Plan my day">ðŸŽ¯ Plan</button>
+      </div>
+
+      <div class="input-bar">
+        <textarea id="userInput" rows="1" placeholder="Type your message..." aria-label="Type your message"></textarea>
+        <button class="send-btn" id="sendBtn">
+          <span class="send-icon">âž¤</span>
+          <div class="spinner"></div>
+        </button>
+      </div>
+    </div>
+
+    <div class="footer">Works offline Â· Adaptive AI Agent Â· ðŸ§  Vanguard Brain</div>
+  </div>
+
+  <script src="/js/agent.js"></script>
+  <script src="/js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(reg => console.log('âœ… Service Worker registered', reg))
+        .catch(err => console.error('âŒ Service Worker failed', err));
+    }
+  </script>
+</body>
+</html>
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\frontend\manifest.json
+================================================================================
+{
+  "name": "Focus Agent",
+  "short_name": "FocusAgent",
+  "description": "AI-powered adaptive scheduling agent",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#0a0a0f",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\frontend\sw.js
+================================================================================
+const CACHE_NAME = 'focus-agent-v3';
+const urlsToCache = [
+  '/', '/index.html', '/css/style.css', '/js/app.js', '/js/agent.js',
+  '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png',
+];
+
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(urlsToCache)));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', event => {
+  const { request } = event;
+
+  // Network-first for API calls so data stays fresh; fall back to cache offline.
+  if (request.url.includes('/api/')) {
+    event.respondWith(
+      fetch(request)
+        .then(response => {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(request, clone));
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Cache-first for static assets, with offline fallback to the app shell.
+  event.respondWith(
+    caches.match(request).then(response => response || fetch(request).catch(() => caches.match('/index.html')))
+  );
+});
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\.env.example
+================================================================================
+# Copy this file to .env and fill in real values. Never commit .env.
+
+# --- LLM Provider ---
+# One of: deepseek | openai | anthropic
+LLM_PROVIDER=deepseek
+LLM_API_KEY=
+
+# --- Database ---
+# Path to the SQLite file (relative to backend/ or absolute)
+DB_PATH=focus_agent.db
+
+# --- Server ---
+PORT=8000
+ENVIRONMENT=development
+
+# --- CORS ---
+# Comma-separated list of allowed origins, or * for all (dev only)
+CORS_ORIGINS=*
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\docker-compose.yml
+================================================================================
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    environment:
+      - DB_PATH=${DB_PATH:-/data/focus_agent.db}
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - PORT=${PORT:-8000}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    volumes:
+      - db_data:/data
+      - ./backend:/app
+    command: python run_server.py
+
+volumes:
+  db_data:
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\Dockerfile
+================================================================================
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+
+ENV PORT=8000 \
+    DB_PATH=focus_agent.db \
+    LLM_PROVIDER=deepseek \
+    ENVIRONMENT=production
+
+EXPOSE 8000
+
+CMD ["python", "run_server.py"]
+
+
+================================================================================
+FILE: C:\Users\Administrator\Desktop\scheduleappv2\README.md
+================================================================================
+# ðŸŽ¯ Focus Agent v2
+
+AI-powered adaptive scheduling PWA. Refactor of the original `focus-agent`
+prototype with a hardened backend and a more forgiving frontend.
+
+## What changed from v1
+
+| Area | Fix |
+|---|---|
+| **Database** | Lightweight `PRAGMA user_version` migration system, CHECK constraints (goal progress 0â€“100, valid statuses, etc.), calendar-aware streak calc that no longer truncates at 30 log rows |
+| **Validation** | All POST bodies are Pydantic models with field-level validators (time format, ISO dates, enums, length limits); DB errors are caught and returned as clean HTTP errors instead of leaking stack traces |
+| **Frontend UX** | Every form button shows a spinner while in-flight and a message that fades out after a few seconds; a single `reportError()`/`showFormMessage()` pair centralizes error handling in `app.js` |
+| **Progress analytics** | `/progress/{user_id}` now also returns habit streaks and average task duration, not just completion/skip counts |
+| **Agent integration** | `agent.js` recognizes structured phrasing ("add task X at 10am", "add goal X", "add habit X") and calls the matching POST helper directly instead of always round-tripping through the LLM |
+| **Deployment** | `.env` / `.env.example`, `Dockerfile` and `docker-compose.yml` all read `DB_PATH`, `LLM_PROVIDER`, `LLM_API_KEY`, `PORT` from the environment |
+| **Duplication** | Removed the unused SQLAlchemy `schemas.py` and one-off `fix_*.py` patch scripts â€” `database.py` is the single source of truth for persistence |
+
+## Project structure
+
+```
+scheduleappv2/
+â”œâ”€â”€ backend/
+â”‚   â”œâ”€â”€ app/
+â”‚   â”‚   â”œâ”€â”€ core/          # agent.py, vanguard_brain.py, robust_parser.py, brain_interface.py
+â”‚   â”‚   â”œâ”€â”€ models/        # database.py (SQLite + migrations)
+â”‚   â”‚   â”œâ”€â”€ routes/        # dashboard.py (all API endpoints)
+â”‚   â”‚   â”œâ”€â”€ services/      # llm_interface.py + deepseek/openai/anthropic adapters
+â”‚   â”‚   â””â”€â”€ main.py        # FastAPI app, DI wiring, logging middleware
+â”‚   â”œâ”€â”€ run_server.py
+â”‚   â””â”€â”€ requirements.txt
+â”œâ”€â”€ frontend/
+â”‚   â”œâ”€â”€ index.html
+â”‚   â”œâ”€â”€ css/style.css
+â”‚   â”œâ”€â”€ js/app.js          # UI logic, centralized error handling
+â”‚   â”œâ”€â”€ js/agent.js         # API client + NL command router
+â”‚   â”œâ”€â”€ manifest.json
+â”‚   â””â”€â”€ sw.js
+â”œâ”€â”€ Dockerfile
+â”œâ”€â”€ docker-compose.yml
+â””â”€â”€ .env.example
+```
+
+## Run locally
+
+```bash
+cd backend
+cp ../.env.example ../.env      # then edit .env with your LLM_API_KEY
+pip install -r requirements.txt
+python run_server.py            # http://localhost:8000
+
+# new terminal
+cd frontend
+python -m http.server 3000      # http://localhost:3000
+```
+
+## Run with Docker
+
+```bash
+cp .env.example .env            # edit as needed
+docker compose up --build
+```
+
+## API quick reference
+
+```bash
+curl http://localhost:8000/health
+curl -X POST http://localhost:8000/api/agent/process \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Plan my day","user_id":"demo_user"}'
+curl http://localhost:8000/api/progress/demo_user
+```
+
+

@@ -360,10 +360,25 @@ function addMessage(type, content) {
 function renderMessage(msg) {
   const div = document.createElement('div');
   div.className = `message ${msg.type}`;
-  const avatar = msg.type === 'user' ? '👤' : '🤖';
+  const avatar = msg.type === 'user' ? '??' : '??';
+  let contentHtml = '';
+  try {
+    const parsed = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
+    if (typeof parsed === 'object' && parsed !== null && window.renderResponse) {
+      contentHtml = window.renderResponse(msg.content);
+    } else {
+      contentHtml = formatContent(msg.content);
+    }
+  } catch {
+    contentHtml = formatContent(msg.content);
+  }
   div.innerHTML = `
     <div class="avatar">${avatar}</div>
-    <div class="bubble">${formatContent(msg.content)}<span class="time">${formatTime(msg.timestamp)}</span></div>`;
+    <div class="bubble structured-bubble">
+      ${contentHtml}
+      <span class="time">${formatTime(msg.timestamp)}</span>
+    </div>
+  `;
   els.messages.appendChild(div);
   els.messages.scrollTop = els.messages.scrollHeight;
 }
