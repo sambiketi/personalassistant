@@ -24,7 +24,6 @@ class Intent(Enum):
 
 @dataclass
 class Task:
-    id: str
     name: str
     start_time: str
     end_time: str
@@ -34,7 +33,7 @@ class Task:
     category: str
     notes: str = ""
     is_flexible: bool = True
-
+    id: str = ""
 
 @dataclass
 class Schedule:
